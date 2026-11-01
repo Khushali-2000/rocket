@@ -6,6 +6,10 @@ Issue #43. Spec: `docs/superpowers/specs/2026-10-15-console-mask-secrets-design.
 
 Console HTTP rows written by `sendRequest` carry a masked copy (`HttpConsoleEntry.masked`), fixed at send time by `maskHttpExchange` in `src/lib/console-redaction.ts`. The marker is `••••••`.
 
+The row of a single send is built from the request the backend sent (`sentRequest`), so a script's writes show in it. RocketVault values arrive already masked by the backend. The frontend masks the other secrets as before, using the sent auth block when present. Without `sentRequest`, and for the error row, the row shows the input fields with their `{{placeholders}}`.
+
+The backend also lists the non-vault secret values that occur in the sent request (`sentRequest.secretValues`, sorted, at least 6 characters). The frontend adds them to the row mask list, so a secret a script wrote during the send is masked too.
+
 - Secret values of the active environment, the global environment and the collection, folder and request variables, in the URL, headers and bodies of the request and the response. Values shorter than 6 characters stay visible, like history and the script engine.
 - The values of `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`. The header name stays visible.
 - Credentials in the URL (`user:pass@host`) and the value of an API key sent as a query parameter.
@@ -30,3 +34,4 @@ Flow rows (`FlowPane.tsx`) and the Runner still write unmasked rows. The Rust re
 1. Send a request that uses a secret environment variable and a Bearer token. The Console row shows `••••••` for both, and the `Authorization` header name stays visible.
 2. Open the row and press `Show secrets`. The raw values appear. Collapse and reopen the row: it is masked again.
 3. Send a request whose environment is not loaded. The row shows `May contain secrets` and has no toggle.
+4. Send a request whose pre-request script changes `{{token}}` with `rok.setVar`. The Console row shows the new token, masked and revealable.

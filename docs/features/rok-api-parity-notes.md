@@ -9,7 +9,7 @@ Runtime: `crates/rocket-infra/src/scripting/bootstrap.js` and `ops/{req,res,rok}
 | Part | Scope | Status |
 |---|---|---|
 | A | Sync, state-only gaps | Spec and plans committed: `docs/superpowers/plans/rok-parity-a/` (index plus 2 plans). Merged to main (plans 01 and 02, final review fixed). Follow-ups: OAuth2 credential APIs, per-folder `__dirname`, collection read-all op for the overlay, getSize after setBody, spec wording (null writes, empty-string misses). |
-| B | Async host calls: `sendRequest`, `runRequest`, `sleep` (`req.onFail` stays a no-op) | Implemented and on main, from `docs/superpowers/plans/rok-parity-b/` (index plus 5 plans) with review fixes in `docs/superpowers/plans/rok-parity-b-fixes/`. Follow-ups are roadmap R-66 (re-resolve the outer request after the pre-request script) and R-67 (review minors). Still true: History badge for script requests, scanner flags for `sendRequest`/`runRequest`. |
+| B | Async host calls: `sendRequest`, `runRequest`, `sleep` (`req.onFail` stays a no-op) | Implemented and on main, from `docs/superpowers/plans/rok-parity-b/` (index plus 5 plans) with review fixes in `docs/superpowers/plans/rok-parity-b-fixes/`. R-66 is done: after the pre-request scripts, a placeholder whose value any scope changed gets the new value, nested runs included, and a nested run sees its caller's unsaved writes (spec `2026-11-01-rok-script-writes-reach-request-design.md`). A pre-request `rok.setEnvVar` (or a global or collection write) now also changes the request being sent, not only later sends. Bruno behaves the same way. The open follow-up is R-67 (review minors). Still true: History badge for script requests, scanner flags for `sendRequest`/`runRequest`. |
 | C | Cookies: `rok.cookies.*`, `jar()` | Implemented and on main, from `docs/superpowers/plans/rok-parity-c/` (index plus 2 plans). Spec: `docs/superpowers/specs/2026-10-07-rok-js-api-parity-c-cookies-design.md`. Manual check: `docs/manual-tests/rok-cookies.md`. |
 | D | `runner.iterationData`, `iterationIndex`, `totalIterations` | Deferred. Needs a runner CSV/JSON data-file feature first. |
 | E | `rok.grpc.*` | Deferred. The gRPC dependency is now on main; it needs a spec. |
@@ -17,6 +17,7 @@ Runtime: `crates/rocket-infra/src/scripting/bootstrap.js` and `ops/{req,res,rok}
 ## Decisions
 
 - Persistence keeps Rocket semantics, which means what the code does today: every script write except `setVar` already persists (env, global and collection), and `EnvVarWrite.persist` is inert. New set and delete APIs persist the same way. (Earlier notes said the opposite, which was wrong.)
+- A collection, folder or request variable with an empty value (and an empty initial value) is skipped: it does not hide a lower scope and a script reads it as undefined, the same as the app preview. An empty secret variable still marks its name secret.
 - Bruno-only Developer-mode APIs (`cwd`, `__dirname`, `__filename`, `require` of node built-ins) follow the trust model in `docs/superpowers/specs/2026-10-07-js-script-security-design.md`.
 
 ## Decisions for B
@@ -57,3 +58,4 @@ Known limits:
 
 - Done (see Decisions for C). The jar has no clear or disable UI yet.
 - Request-scoped helpers use the active request URL. `jar()` takes explicit URLs. `__Host-` cookies must omit `domain`.
+- A value a script saved from a response is now filled from other stored variables, secret ones included, when a request uses it. Vault and `process.env` names are never filled. Nested filling covers HTTP and GraphQL requests only for now: WebSocket, gRPC, subscriptions and the OAuth2 Get token button fill one level.
