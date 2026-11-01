@@ -55,7 +55,7 @@ def main():
     files = [f for f in staged + extra if f]
     checks = []
     if any(f.endswith((".ts", ".tsx")) for f in files):
-        checks += [["yarn", "tsc", "--noEmit"], ["yarn", "check"]]
+        checks += [["bun", "run", "tsc", "--noEmit"], ["bun", "run", "check"]]
     if any(f.endswith(".rs") for f in files):
         checks += [["cargo", "check", "-j4"]]
     deadline = time.time() + BUDGET

@@ -5,7 +5,7 @@ A removable set of guard hooks, a resume skill and orchestration rules.
 ## Pieces
 
 - `hooks/bash-guard`: denies `cargo test|check|clippy|build` without `-j`, `cargo test --workspace|--all`, bare `git stash` / `git stash pop`, and `git add -A|--all|.`. Matches command tokens per shell segment, so quoted text and heredoc bodies do not trigger it.
-- `hooks/commit-gate`: before `git commit`, runs `yarn tsc --noEmit` and `yarn check` for staged `.ts/.tsx`, and `cargo check -j4` for staged `.rs`. Skip with `HARNESS_GATE=0`. Budget is 600 s. Paths given after `--` or in a `git add` in the same command also count.
+- `hooks/commit-gate`: before `git commit`, runs `bun run tsc --noEmit` and `bun run check` for staged `.ts/.tsx`, and `cargo check -j4` for staged `.rs`. Skip with `HARNESS_GATE=0`. Budget is 600 s. Paths given after `--` or in a `git add` in the same command also count.
 - `../skills/resume-plan/SKILL.md`: checklist for finding where multi-plan work stands after `/clear` or compaction.
 - `../rules/harness.md`: what the hooks enforce and the orchestration convention.
 - `install.sh` / `uninstall.sh`: wire the hooks into `.claude/settings.json`. Both accept `--root <dir>` or `HARNESS_ROOT`.
