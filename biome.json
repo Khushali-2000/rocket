@@ -1,105 +1,98 @@
 {
-    "$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
-    "vcs": {
-        "enabled": true,
-        "clientKind": "git",
-        "useIgnoreFile": true
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": false,
+    "includes": [
+      "src/**",
+      "scripts/**",
+      "!dist/**",
+      "!src-tauri/**",
+      "!node_modules/**",
+      "!.worktrees/**",
+      "!coverage/**",
+      "!**/__tests__/**",
+      "!**/*.test.ts",
+      "!**/*.test.tsx",
+      "!**/*.spec.ts",
+      "!**/*.spec.tsx"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        "useExhaustiveDependencies": "error",
+        "useHookAtTopLevel": "error",
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "useParseIntRadix": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noEmptyBlockStatements": "error",
+        "noArrayIndexKey": "error",
+        "noConsole": "off"
+      },
+      "style": {
+        "noParameterAssign": "error",
+        "noNonNullAssertion": "warn",
+        "useNodejsImportProtocol": "error",
+        "useImportType": "error"
+      },
+      "complexity": {
+        "useLiteralKeys": "off",
+        "useOptionalChain": "error"
+      },
+      "a11y": {
+        "noSvgWithoutTitle": "off",
+        "noStaticElementInteractions": "error",
+        "useKeyWithClickEvents": "error",
+        "useFocusableInteractive": "error",
+        "useSemanticElements": "error",
+        "useAriaPropsForRole": "error",
+        "noNoninteractiveTabindex": "error",
+        "noNoninteractiveElementToInteractiveRole": "error",
+        "useAriaPropsSupportedByRole": "error",
+        "useButtonType": "error",
+        "noAutofocus": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "trailingCommas": "all",
+      "semicolons": "always",
+      "bracketSpacing": true,
+      "jsxQuoteStyle": "single",
+      "bracketSameLine": false
     },
-    "files": {
-        "ignoreUnknown": false,
-        "includes": [
-            "src/**",
-            "scripts/**",
-            "!dist/**",
-            "!src-tauri/**",
-            "!node_modules/**",
-            "!.worktrees/**",
-            "!coverage/**",
-            "!**/__tests__/**",
-            "!**/*.test.ts",
-            "!**/*.test.tsx",
-            "!**/*.spec.ts",
-            "!**/*.spec.tsx"
-        ]
+    "globals": ["window", "document", "navigator", "location", "history", "console"]
+  },
+  "css": {
+    "parser": {
+      "cssModules": false,
+      "allowWrongLineComments": false,
+      "tailwindDirectives": true
     },
     "formatter": {
-        "enabled": true,
-        "indentStyle": "space",
-        "indentWidth": 2,
-        "lineWidth": 100,
-        "lineEnding": "lf"
-    },
-    "linter": {
-        "enabled": true,
-        "rules": {
-            "recommended": true,
-            "correctness": {
-                "useExhaustiveDependencies": "error",
-                "useHookAtTopLevel": "error",
-                "noUnusedVariables": "error",
-                "noUnusedImports": "error",
-                "useParseIntRadix": "error"
-            },
-            "suspicious": {
-                "noExplicitAny": "error",
-                "noEmptyBlockStatements": "error",
-                "noArrayIndexKey": "error",
-                "noConsole": "off"
-            },
-            "style": {
-                "noParameterAssign": "error",
-                "noNonNullAssertion": "warn",
-                "useNodejsImportProtocol": "error",
-                "useImportType": "error"
-            },
-            "complexity": {
-                "useLiteralKeys": "off",
-                "useOptionalChain": "error"
-            },
-            "a11y": {
-                "noSvgWithoutTitle": "off",
-                "noStaticElementInteractions": "error",
-                "useKeyWithClickEvents": "error",
-                "useFocusableInteractive": "error",
-                "useSemanticElements": "error",
-                "useAriaPropsForRole": "error",
-                "noNoninteractiveTabindex": "error",
-                "noNoninteractiveElementToInteractiveRole": "error",
-                "useAriaPropsSupportedByRole": "error",
-                "useButtonType": "error",
-                "noAutofocus": "off"
-            }
-        }
-    },
-    "javascript": {
-        "formatter": {
-            "quoteStyle": "single",
-            "trailingCommas": "all",
-            "semicolons": "always",
-            "bracketSpacing": true,
-            "jsxQuoteStyle": "single",
-            "bracketSameLine": false
-        },
-        "globals": [
-            "window",
-            "document",
-            "navigator",
-            "location",
-            "history",
-            "console"
-        ]
-    },
-    "css": {
-        "parser": {
-            "cssModules": false,
-            "allowWrongLineComments": false,
-            "tailwindDirectives": true
-        },
-        "formatter": {
-            "enabled": true,
-            "indentStyle": "space",
-            "indentWidth": 2,
-            "lineWidth": 100
-        }
+      "enabled": true,
+      "indentStyle": "space",
+      "indentWidth": 2,
+      "lineWidth": 100
     }
+  }
 }
