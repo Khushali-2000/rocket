@@ -32,7 +32,7 @@ export function OpenApiSyncNotifier() {
           queryFn: () => getOpenApiSyncStatus(collection, false),
           staleTime: 0,
         });
-        if (!info || info.consent !== 'granted' || !info.hasPending || !info.pendingId) return;
+        if (info?.consent !== 'granted' || !info.hasPending || !info.pendingId) return;
         // The badge count comes first, so a failed lookup does not consume the id.
         const badges = await queryClient.fetchQuery({
           networkMode: 'always',

@@ -37,7 +37,7 @@ export function referenceCompletions(
 ): CompletionSource {
   return (context: CompletionContext): CompletionResult | null => {
     const match = triggerAt(context);
-    if (!match || match.kind !== 'reference') return null;
+    if (match?.kind !== 'reference') return null;
     const items = source.current(match.query);
     if (items.length === 0) return null;
     const options: Completion[] = items.map((item) => ({
@@ -62,7 +62,7 @@ export function commandCompletions(
 ): CompletionSource {
   return (context: CompletionContext): CompletionResult | null => {
     const match = triggerAt(context);
-    if (!match || match.kind !== 'command') return null;
+    if (match?.kind !== 'command') return null;
     const commands = source.current(match.query);
     if (commands.length === 0) return null;
     const options: Completion[] = commands.map((command) => ({

@@ -180,7 +180,7 @@ export function mapGrpcToState(g: GrpcRequest): RequestState {
         messages.length > 0
           ? messages
           : [{ id: crypto.randomUUID(), title: '', content: DEFAULT_GRPC_MESSAGE }],
-      activeMessage: selected >= 0 ? selected : 0,
+      activeMessage: Math.max(selected, 0),
       passthrough: { seq: g.seq, description: g.description, scripts: g.scripts },
     },
   };

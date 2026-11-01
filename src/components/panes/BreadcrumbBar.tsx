@@ -563,7 +563,7 @@ function SegmentButton({ seg, isLast, isOpen, onOpenChange }: SegmentButtonProps
       const result = await seg.picker.loadItems();
       setItems(result);
       const activeIdx = result.findIndex((it) => it.isActive);
-      setActiveIndex(activeIdx >= 0 ? activeIdx : 0);
+      setActiveIndex(Math.max(activeIdx, 0));
     } finally {
       setLoading(false);
     }

@@ -677,6 +677,13 @@ html.windows.window-inactive #root {
   box-shadow: none;
 }
 
+/* Collection overview — VS Code uses flat workbench panels rather than elevated cards.
+   Scope this to collection views so dialogs and other workflows retain their existing treatment. */
+.collection-overview-workbench [data-slot="card"] {
+  border-radius: 4px;
+  box-shadow: none;
+}
+
 .dark [data-slot="card"] [data-slot="card"] {
   border-radius: calc(var(--radius) - 4px);
   background-color: hsl(var(--accent));
@@ -689,13 +696,6 @@ html.windows.window-inactive #root {
 /* Solid --accent surfaces (active rows) have the same problem, so lift secondary text on them too. */
 .dark .bg-accent {
   --muted-foreground: 0 0% 56%;
-}
-
-/* Collection overview — VS Code uses flat workbench panels rather than elevated cards.
-   Scope this to collection views so dialogs and other workflows retain their existing treatment. */
-.collection-overview-workbench [data-slot="card"] {
-  border-radius: 4px;
-  box-shadow: none;
 }
 
 .dark .collection-overview-workbench [data-slot="card"] {
