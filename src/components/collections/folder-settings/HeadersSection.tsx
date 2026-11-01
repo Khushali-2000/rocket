@@ -1,8 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { HeadersEditor } from '@/components/request/HeadersEditor';
 import { useFolderVariableContext } from '@/hooks/useFolderVariableContext';
+import { useInheritedHeaders } from '@/hooks/useInheritedHeaders';
+import { buildInheritedHeaderRows } from '@/lib/folder-header-inheritance';
 import { entriesToHeaders, headersToEntries } from '@/lib/folder-settings-convert';
 import type { KeyValueEntry } from '@/types/pane-types';
+import { InheritedHeadersList } from './InheritedHeadersList';
 import type { FolderSectionProps } from './sections';
 
 export function HeadersSection({
@@ -18,6 +21,14 @@ export function HeadersSection({
     collectionName,
     folderPath,
     settings.variables,
+  );
+  const levels = useInheritedHeaders(collectionName, folderPath);
+  const inheritedRows = useMemo(
+    () =>
+      levels
+        ? buildInheritedHeaderRows(levels.collection, levels.parents, settings.headers ?? [])
+        : [],
+    [levels, settings.headers],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: only an outside change to settings.headers resets the rows; the local rows are compared inside.
@@ -39,11 +50,22 @@ export function HeadersSection({
 
   return (
     <div className='p-4 max-w-3xl'>
-      <p className='mb-3 text-xs text-muted-foreground'>
-        These headers are sent with every request in this folder and its subfolders. A request, or a
-        folder closer to it, replaces a header with the same name.
+      <p className='mb-3 text-sm text-muted-foreground max-w-[70ch]'>
+        Sent with every request in this folder and its subfolders. A request or a nearer folder
+        replaces a header with the same name.
       </p>
-      <HeadersEditor headers={entries} onChange={handleChange} variableContext={variableContext} />
+      <InheritedHeadersList rows={inheritedRows} />
+      {entries.length === 0 && (
+        <p className='mb-3 text-sm text-muted-foreground max-w-[70ch]'>
+          No headers on this folder. Add one to send it with every request below.
+        </p>
+      )}
+      <HeadersEditor
+        headers={entries}
+        onChange={handleChange}
+        variableContext={variableContext}
+        addLabel='Add header'
+      />
     </div>
   );
 }

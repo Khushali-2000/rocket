@@ -7,6 +7,7 @@ interface HeadersEditorProps {
   onChange: (headers: KeyValueEntry[]) => void;
   variableContext?: Map<string, VariableScopeEntry>;
   onNavigateToSource?: (source: VariableSource | 'pathParam', key: string) => void;
+  addLabel?: string;
 }
 
 export function HeadersEditor({
@@ -14,6 +15,7 @@ export function HeadersEditor({
   onChange,
   variableContext,
   onNavigateToSource,
+  addLabel,
 }: HeadersEditorProps) {
   return (
     <KeyValueEditor
@@ -21,7 +23,7 @@ export function HeadersEditor({
       onChange={onChange}
       keyPlaceholder='Header name'
       valuePlaceholder='Value'
-      addLabel='Add Header'
+      addLabel={addLabel ?? 'Add Header'}
       variableContext={variableContext}
       onNavigateToSource={onNavigateToSource}
     />

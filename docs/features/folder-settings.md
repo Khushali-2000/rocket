@@ -38,6 +38,14 @@ Design: `docs/superpowers/specs/2026-10-07-folder-settings-design.md`. Plans and
 - Only a mounted tab takes part. An unmounted tab already drops its edits, so there is nothing to protect.
 - A header replaced by a proposal loses its description.
 
+### Headers tab
+
+- The folder header shows a summary line such as "12 requests, 3 subfolders" (`src/lib/folder-counts.ts`). It counts at every depth. A folder with nothing in it reads "Empty folder". The tab makes one `getCollection` call when it opens. The counts stay until the tab is reopened, and a failed load shows no line.
+- With no headers the tab shows an empty state instead of a blank table.
+- `InheritedHeadersList` is a read-only list of the headers the folder receives from the collection and its parent folders. Each row has a source chip. A row reads "Overridden here" when this folder has an enabled header with exactly the same name (case-sensitive, like the backend merge).
+- The list shows saved values only, so unsaved edits in a parent folder tab are not shown. It makes one read per ancestor folder plus the collection, with no cache (`src/hooks/useInheritedHeaders.ts`, `src/lib/folder-header-inheritance.ts`).
+- The Save button is outlined when the tab is clean and filled when it has unsaved changes.
+
 ## Known gaps
 
 These were found in review and left on purpose. Check them before building on the area.
