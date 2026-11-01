@@ -82,7 +82,7 @@ export function AssistantPanel() {
       aria-label='AI Assistant'
       style={{ '--assistant-w': `${width}px` } as CSSProperties}
       // Above the editor (z-5, like the sidebar) so the raised shadow shows over it and Settings.
-      className='elevation-raised-end relative z-[5] flex w-(--assistant-w) shrink-0 flex-col border-l'
+      className='elevation-raised-end relative z-5 flex w-(--assistant-w) shrink-0 flex-col border-l'
     >
       {/* biome-ignore lint/a11y/useSemanticElements: <hr role="separator"> is a horizontal rule and cannot be a draggable, focusable resize handle */}
       <div

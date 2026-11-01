@@ -151,7 +151,7 @@ describe('raised sidebar', () => {
 
   it('puts elevation-raised on the sidebar wrapper and keeps its stacking', () => {
     const app = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8');
-    expect(app).toContain('elevation-raised w-(--sidebar-w) shrink-0 relative z-[5]');
+    expect(app).toContain('elevation-raised w-(--sidebar-w) shrink-0 relative z-5');
     expect(app).not.toContain('sidebar-elevation');
   });
 });
@@ -177,7 +177,7 @@ describe('raised assistant panel', () => {
       'utf8',
     );
     expect(panel).toContain('elevation-raised-end');
-    expect(panel).toMatch(/relative z-\[5\]/);
+    expect(panel).toMatch(/relative z-5/);
     expect(panel).not.toMatch(/className='relative flex w-\(--assistant-w\)[^']*bg-background/);
   });
 });

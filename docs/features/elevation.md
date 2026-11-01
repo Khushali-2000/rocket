@@ -42,7 +42,7 @@ as an `.elevation-*` class that sets a fill. The shadow-only helpers (`elevation
 - Raised: the Collections sidebar wrapper in `src/App.tsx` (`elevation-raised`, and `--sidebar-bg`
   aliases the raised token).
 - Raised, right edge: the AI Assistant panel (`elevation-raised-end`, `--elevation-shadow-raised-end`,
-  the same shadow mirrored toward the editor, `relative z-[5]`).
+  the same shadow mirrored toward the editor, `relative z-5`).
 - Chrome shadow (`elevation-chrome`, falls down, shadow only, `relative z-[1]`): the breadcrumb row
   (on the default surface, like the tab row above it), the collection overview header while scrolled,
   and the Console header. Each edge has at most one shadow. Upper rows stay plain.
@@ -69,7 +69,7 @@ Solid borders use the plain `border-border` token, one 1px weight everywhere. Do
 
 ## Stacking
 
-The Settings overlay in `MainArea` is `z-[1]`, below the sidebar wrapper (`z-[5]`), so the raised
+The Settings overlay in `MainArea` is `z-[1]`, below the sidebar wrapper (`z-5`), so the raised
 shadow shows over Settings. The editor wrapper stays `isolate` and `inert`.
 
 ## Contrast
