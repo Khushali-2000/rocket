@@ -1,8 +1,10 @@
 import { FolderCog } from 'lucide-react';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useFolderSettings } from '@/hooks/useFolderSettings';
-import type { FolderSettings } from '@/lib/tauri-api';
+import { countFolderContents, describeFolderContents } from '@/lib/folder-counts';
+import { findFolder } from '@/lib/runner-flatten';
+import { type Collection, type FolderSettings, getCollection } from '@/lib/tauri-api';
 import { usePaneStore } from '@/stores/pane-store';
 import type { FolderTab } from '@/types/pane-types';
 import { AuthSection } from './folder-settings/AuthSection';
@@ -22,13 +24,35 @@ interface FolderSettingsTabProps {
 export function FolderSettingsTab({ tab }: FolderSettingsTabProps) {
   const updateFolderSection = usePaneStore((s) => s.updateFolderSection);
   const folderName = tab.folderPath.split('/').pop() ?? tab.folderPath;
-  const breadcrumb = [tab.collectionName, ...tab.folderPath.split('/')].join(' / ');
   const { settings, setSettings, isDirty, isLoaded, error, save, saveState } = useFolderSettings(
     tab.collectionName,
     tab.folderPath,
   );
   const markDirty = usePaneStore((s) => s.markDirty);
   const markClean = usePaneStore((s) => s.markClean);
+
+  // Load the collection tree for the summary line. A failure just hides the line.
+  const [collection, setCollection] = useState<Collection | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setCollection(null);
+    getCollection(tab.collectionName)
+      .then((col) => {
+        if (!cancelled) setCollection(col);
+      })
+      .catch(() => {
+        // The summary line is optional, so a load error is ignored.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tab.collectionName]);
+
+  const summary = useMemo(() => {
+    if (!collection) return null;
+    const found = findFolder(collection.root, '', tab.folderPath);
+    return found ? describeFolderContents(countFolderContents(found)) : null;
+  }, [collection, tab.folderPath]);
 
   // Sections send partial patches. Merge them into the whole settings object.
   const handleChange = useCallback(
@@ -66,7 +90,7 @@ export function FolderSettingsTab({ tab }: FolderSettingsTabProps) {
         <FolderCog aria-hidden='true' className='h-5 w-5 shrink-0 text-muted-foreground' />
         <div className='min-w-0'>
           <h1 className='truncate text-base font-semibold text-foreground'>{folderName}</h1>
-          <p className='truncate text-xs text-muted-foreground'>{breadcrumb}</p>
+          {summary && <p className='truncate text-xs text-muted-foreground'>{summary}</p>}
         </div>
         <div className='ml-auto'>
           <FolderSaveButton

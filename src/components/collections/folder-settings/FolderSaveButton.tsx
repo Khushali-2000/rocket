@@ -22,6 +22,7 @@ export function FolderSaveButton({ isDirty, isLoaded, saveState, onSave }: Folde
       )}
       <Button
         size='sm'
+        variant={isDirty ? 'default' : 'outline'}
         onClick={onSave}
         disabled={!isLoaded || !isDirty || saveState !== 'idle'}
         className={cn('gap-1.5', saveState === 'success' && 'text-green-600')}

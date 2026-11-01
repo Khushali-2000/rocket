@@ -32,7 +32,7 @@ export function getRunnerFolderOptions(collection: Collection): RunnerFolderOpti
 // Finds the Folder at `folderPath` (relative to the collection root),
 // walking the same dirName/name formula FolderNode.tsx uses to build
 // paths while rendering the sidebar tree. Returns null if not found.
-function findFolder(folder: Folder, basePath: string, targetPath: string): Folder | null {
+export function findFolder(folder: Folder, basePath: string, targetPath: string): Folder | null {
   if (basePath === targetPath) return folder;
   for (const item of folder.items) {
     if (item.type !== 'folder') continue;

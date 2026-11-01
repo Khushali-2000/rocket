@@ -1,8 +1,9 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FolderSettingsTab } from '@/components/collections/FolderSettingsTab';
 import { collectAllTabs } from '@/lib/pane-utils';
+import { getCollection } from '@/lib/tauri-api';
 import { usePaneStore } from '@/stores/pane-store';
 import type { FolderTab } from '@/types/pane-types';
 import { isFolderTab } from '@/types/pane-types';
@@ -22,6 +23,38 @@ vi.mock('@/lib/tauri-api', async () => {
     saveFolderSettings: vi.fn().mockResolvedValue(undefined),
   };
 });
+
+const req = (name: string) => ({ type: 'request', uid: name, name });
+
+// A small tree with the folder auth/oauth holding 3 requests and 1 subfolder.
+const sampleCollection = {
+  name: 'my-col',
+  settings: {},
+  root: {
+    uid: 'root',
+    name: 'my-col',
+    items: [
+      {
+        type: 'folder',
+        uid: 'auth',
+        name: 'auth',
+        items: [
+          {
+            type: 'folder',
+            uid: 'oauth',
+            name: 'oauth',
+            items: [
+              req('login'),
+              req('refresh'),
+              req('logout'),
+              { type: 'folder', uid: 'tokens', name: 'tokens', items: [] },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+};
 
 function storedTab(): FolderTab {
   const tab = collectAllTabs(usePaneStore.getState().root).find(isFolderTab);
@@ -51,14 +84,23 @@ describe('FolderSettingsTab', () => {
   });
 
   beforeEach(() => {
+    vi.mocked(getCollection).mockResolvedValue(sampleCollection as never);
     usePaneStore.getState().reset();
     usePaneStore.getState().openFolderTab('my-col', 'auth/oauth');
   });
 
-  it('shows the folder name and the collection breadcrumb', async () => {
+  it('shows the folder name and the contents summary', async () => {
     await renderStoredTab();
     expect(screen.getByRole('heading', { name: 'oauth' })).toBeInTheDocument();
-    expect(screen.getByText('my-col / auth / oauth')).toBeInTheDocument();
+    expect(await screen.findByText('3 requests, 1 subfolder')).toBeInTheDocument();
+  });
+
+  it('shows no summary and does not crash when the collection fails to load', async () => {
+    vi.mocked(getCollection).mockRejectedValue(new Error('load failed'));
+    await renderStoredTab();
+    expect(screen.getByRole('heading', { name: 'oauth' })).toBeInTheDocument();
+    await waitFor(() => expect(getCollection).toHaveBeenCalled());
+    expect(screen.queryByText(/requests?, \d+ subfolders?/)).not.toBeInTheDocument();
   });
 
   it('shows the six sections in order', async () => {
