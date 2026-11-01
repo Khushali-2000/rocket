@@ -144,11 +144,19 @@ fn spawn_exit_signal_listener(app_handle: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Work around a WebKitGTK GPU-compositing bug that renders the Scripts tab
-    // Monaco editors transparent. Set before any thread or webview exists.
+    // WebKitGTK older than 2.54 renders the Scripts tab Monaco editors transparent with GPU
+    // compositing on, so turn it off there. 2.54 and newer need it on, or the window paints only
+    // in parts. ROCKET_ENABLE_COMPOSITING=1 keeps it on for any version. Set before any thread or
+    // webview exists.
     #[cfg(target_os = "linux")]
-    unsafe {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    if commands::app::should_disable_compositing(
+        Some(commands::app::webkit_version()),
+        std::env::var_os(commands::app::ENABLE_COMPOSITING_ENV).as_deref(),
+    ) {
+        // SAFETY: No other thread exists yet, so nothing reads the environment concurrently.
+        unsafe {
+            std::env::set_var(commands::app::DISABLE_COMPOSITING_ENV, "1");
+        }
     }
 
     // Must run before any WebsiteDataManager (and so any webview) exists.
@@ -1089,6 +1097,7 @@ pub fn run() {
             commands::proxy::get_proxy_settings,
             commands::proxy::save_proxy_settings,
             commands::app::get_app_data_dir,
+            commands::app::is_compositing_disabled,
             commands::audit::list_audit_events,
             commands::audit::list_audit_events_range,
             commands::audit::get_compliance_profile,

@@ -2,8 +2,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// WebKitGTK on Linux hangs on some color-mix() paints and has compositing turned off, so blur does
-// nothing there. These checks guard the whole app, not only the elevation rules.
+// WebKitGTK on Linux hangs on some color-mix() paints, and Rocket turns compositing off below 2.54, so
+// blur does nothing there. These checks guard the whole app, not only the elevation rules.
 
 const srcRoot = resolve(process.cwd(), 'src');
 const css = readFileSync(join(srcRoot, 'globals.css'), 'utf8');
@@ -66,6 +66,25 @@ describe('WebKitGTK hazards', () => {
       .map((f) => f.slice(srcRoot.length + 1).replace(/\\/g, '/'))
       .filter((f) => !KNOWN_COLOR_MIX.includes(f));
     expect(offenders).toEqual([]);
+  });
+
+  // Blur never paints when Linux compositing is off (WebKitGTK older than 2.54), and @supports cannot detect that, so every
+  // overlay that uses a see-through fill needs an opaque `html.no-compositing` rule.
+  it('makes every blurred overlay opaque when compositing is off', () => {
+    const slots = [
+      'dropdown-menu-content',
+      'dropdown-menu-sub-content',
+      'context-menu-content',
+      'context-menu-sub-content',
+      'select-content',
+      'popover-content',
+      'sheet-overlay',
+    ];
+    for (const slot of slots) {
+      expect(css).toContain(`html.no-compositing [data-slot="${slot}"]`);
+    }
+    expect(css).toMatch(/html\.no-compositing \.backdrop-blur-sm,\s*html\.no-compositing \.backdrop-blur-md\s*\{[^}]*backdrop-filter:\s*none/);
+    expect(css).toContain('html.no-compositing .bg-card\\/50.backdrop-blur-sm');
   });
 
   it('puts no opacity modifier on an elevation colour', () => {

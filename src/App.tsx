@@ -27,7 +27,12 @@ import {
 import { environmentKeys, reloadGlobalEnvironments } from '@/lib/queries/environment-queries';
 import { workspaceKeys } from '@/lib/queries/workspace-queries';
 import { getQueryClient } from '@/lib/query-client';
-import { getActiveWorkspace, listWorkspaces, type Workspace } from '@/lib/tauri-api';
+import {
+  getActiveWorkspace,
+  isCompositingDisabled,
+  listWorkspaces,
+  type Workspace,
+} from '@/lib/tauri-api';
 import { restoreUiState, scheduleSaveUiState, subscribeLayoutStoreToUiState } from '@/lib/ui-state';
 import { useWebSocketEventBridge } from '@/lib/websocket-event-bridge';
 import { clearWorkspaceScopedCaches } from '@/lib/workspace-switch';
@@ -181,6 +186,16 @@ function App() {
     const os = osType();
     const html = document.documentElement;
     if (os === 'linux') html.classList.add('linux');
+    // Overlays start opaque on Linux and turn translucent once the backend says compositing is on
+    // (WebKitGTK 2.54 or newer, or ROCKET_ENABLE_COMPOSITING set).
+    if (os === 'linux') {
+      html.classList.add('no-compositing');
+      isCompositingDisabled()
+        .then((disabled) => html.classList.toggle('no-compositing', disabled))
+        .catch(() => {
+          // Keep overlays opaque when the backend cannot answer.
+        });
+    }
     if (os === 'windows') html.classList.add('windows');
 
     if (os === 'linux' || os === 'windows') {

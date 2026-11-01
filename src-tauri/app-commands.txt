@@ -143,6 +143,7 @@ import_openapi_url
 import_postman_collection
 import_postman_environment
 import_wsdl
+is_compositing_disabled
 link_external_collection
 lint_flow
 list_agent_configs

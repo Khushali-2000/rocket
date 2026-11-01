@@ -1348,6 +1348,7 @@ export const clearCookies = () => invoke<void>('clear_cookies');
 // ============================================================
 
 export const getAppDataDir = () => invoke<string>('get_app_data_dir');
+export const isCompositingDisabled = () => invoke<boolean>('is_compositing_disabled');
 
 // ============================================================
 // Git

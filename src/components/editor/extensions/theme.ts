@@ -133,7 +133,7 @@ export const rocketTheme = EditorView.theme({
     border: '1px solid hsl(var(--dropdown-border))',
     borderRadius: 'calc(var(--radius) - 4px)',
     boxShadow: '0 2px 8px rgba(0,0,0,0.16)',
-    // Opaque on purpose: WebKitGTK ignores backdrop-filter, so a translucent list is unreadable.
+    // Opaque on purpose: WebKitGTK without compositing ignores backdrop-filter, so a translucent list is unreadable.
     background: 'hsl(var(--dropdown-bg))',
     overflow: 'hidden',
   },
@@ -172,7 +172,7 @@ export const rocketTheme = EditorView.theme({
     border: '1px solid hsl(var(--dropdown-border))',
     borderRadius: 'calc(var(--radius) - 4px)',
     boxShadow: '0 2px 8px rgba(0,0,0,0.16)',
-    // Opaque on purpose: WebKitGTK ignores backdrop-filter, so a translucent list is unreadable.
+    // Opaque on purpose: WebKitGTK without compositing ignores backdrop-filter, so a translucent list is unreadable.
     background: 'hsl(var(--dropdown-bg))',
     color: 'hsl(var(--muted-foreground))',
     fontSize: '11px',

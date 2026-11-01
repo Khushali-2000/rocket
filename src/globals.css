@@ -462,8 +462,7 @@
   transform: translateZ(0);
 }
 
-/* WebKitGTK on Linux does not enable GPU compositing by default, so
-   backdrop-filter silently does nothing and semi-transparent backgrounds
+/* When WebKitGTK paints without GPU compositing, backdrop-filter silently does nothing and semi-transparent backgrounds
    (bg-dropdown-bg/50, bg-card/50, bg-background/20) look washed-out or
    invisible. When backdrop-filter is unsupported we disable the blur and
    force opaque surfaces so overlays remain readable. */
@@ -495,6 +494,36 @@
   [data-slot="sheet-overlay"] {
     background-color: hsl(var(--background) / 0.7);
   }
+}
+
+/* Rocket sets WEBKIT_DISABLE_COMPOSITING_MODE=1 on Linux when WebKitGTK is older than 2.54
+   (src-tauri/src/commands/app.rs) unless ROCKET_ENABLE_COMPOSITING is set, and then blur never paints. The @supports check above cannot
+   see this, because WebKitGTK still reports the syntax as supported. App.tsx puts the
+   `no-compositing` class on <html> in that case, and these rules make the overlays opaque. */
+html.no-compositing .backdrop-blur-sm,
+html.no-compositing .backdrop-blur-md {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transform: none;
+}
+
+html.no-compositing [data-slot="dropdown-menu-content"],
+html.no-compositing [data-slot="dropdown-menu-sub-content"],
+html.no-compositing [data-slot="context-menu-content"],
+html.no-compositing [data-slot="context-menu-sub-content"],
+html.no-compositing [data-slot="select-content"],
+html.no-compositing [data-slot="popover-content"] {
+  background-color: hsl(var(--dropdown-bg));
+}
+
+/* Card popovers (collection switcher, variable popover) use bg-card/50 with blur. */
+html.no-compositing [data-slot="popover-content"].bg-card\/50,
+html.no-compositing .bg-card\/50.backdrop-blur-sm {
+  background-color: hsl(var(--card));
+}
+
+html.no-compositing [data-slot="sheet-overlay"] {
+  background-color: hsl(var(--background) / 0.7);
 }
 
 /* Modern thin scrollbars. */
