@@ -2108,33 +2108,15 @@ fn send_time_credential_value(
 }
 
 /// The variables `resolve_request` uses for `request_input`: global < collection <
-/// environment < folder < request, vault values and flow variables, read now. With
-/// `host_env`, `{{process.env.NAME}}` resolves too.
+/// environment < folder < request, vault values and flow variables, read now, with nested
+/// names filled. With `host_env`, `{{process.env.NAME}}` resolves too.
 fn send_vars(
     exec: &RequestExecutionService,
     request_input: &ExecuteRequestInput,
     external_secrets: &HashMap<String, String>,
     host_env: bool,
 ) -> HashMap<String, String> {
-    let mut vars = if host_env {
-        exec.build_variable_context_with_process_env(
-            request_input.global_env_name.as_deref(),
-            request_input.collection.as_deref(),
-            request_input.environment_name.as_deref(),
-            request_input.request_path.as_deref(),
-            external_secrets,
-        )
-    } else {
-        exec.build_variable_context(
-            request_input.global_env_name.as_deref(),
-            request_input.collection.as_deref(),
-            request_input.environment_name.as_deref(),
-            request_input.request_path.as_deref(),
-            external_secrets,
-        )
-    };
-    vars.extend(request_input.flow_vars.clone());
-    vars
+    exec.send_variable_map(request_input, external_secrets, host_env)
 }
 
 /// Refuses `wired_url` when its origin (scheme, host and port) differs from the origin of
@@ -2804,6 +2786,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            sent_request: None,
         }
     }
 
@@ -11143,6 +11126,131 @@ mod tests {
         assert_eq!(
             send_time_credential_value(&exec, &input, &HashMap::new()).as_deref(),
             Some("k-123")
+        );
+    }
+
+    /// `host_env_exec`, but the collection holds `vars` as plain variables.
+    fn exec_with_vars(
+        executor: &Arc<RecordingExecutor>,
+        vars: &[(&str, &str)],
+    ) -> RequestExecutionService {
+        let mut collection = rocket_collection::Collection::new("my-api");
+        for (key, value) in vars {
+            collection
+                .settings
+                .variables
+                .push(collection_var(key, value));
+        }
+        exec_with_collection(executor, collection)
+    }
+
+    #[tokio::test]
+    async fn a_nested_auth_node_credential_is_masked_everywhere() {
+        use rocket_shared::types::Auth;
+
+        const KEY: &str = "pk-live-123456";
+        // Neither name is a secret variable. The Auth node is what makes the value a credential.
+        let executor = RecordingExecutor::new();
+        executor.set_body("api.example.com/x", "echo pk-live-123456");
+        let exec = exec_with_vars(&executor, &[("apiKey", "{{prodKey}}"), ("prodKey", KEY)]);
+        let mut r = saved_flow_node("r", "req.yml");
+        if let FlowNodeKind::Request { debug, .. } = &mut r.kind {
+            *debug = true;
+        }
+        let flow = Flow {
+            name: "auth-req".to_string(),
+            nodes: vec![
+                FlowNode {
+                    id: "a".to_string(),
+                    kind: FlowNodeKind::Auth {
+                        label: "Sign in".to_string(),
+                        auth: Auth::Bearer {
+                            token: "{{apiKey}}".to_string(),
+                        },
+                        apply_to_inherit: true,
+                    },
+                    position: NodePosition { x: 0.0, y: 0.0 },
+                },
+                r,
+            ],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        let mut saved = Request::new("Get", HttpMethod::Get, "https://api.example.com/x");
+        saved.runtime_auth = Some(Auth::Inherit);
+        saved.post_response_script = Some("console.log('R=' + res.getBody());".into());
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(
+                FakeCollectionRepo::new()
+                    .with_request("my-api", "req.yml", saved)
+                    .build(),
+            ),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service
+            .run(&exec, run_input("auth-req"))
+            .await
+            .expect("run");
+
+        // The request sends the filled key.
+        assert_eq!(
+            executor.sent_auths(),
+            vec![Auth::Bearer {
+                token: KEY.to_string()
+            }]
+        );
+        let step = step_of(&summary, "r");
+        assert_eq!(step.error, None);
+        assert!(
+            step.logs.iter().any(|l| l.message.starts_with("R=")),
+            "{:?}",
+            step.logs
+        );
+        let json = serde_json::to_string(step).expect("serialize");
+        assert!(!json.contains(KEY), "{json}");
+        assert!(step.debug_request.is_some() && step.exchange.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_wired_url_on_a_nested_base_url_keeps_its_origin() {
+        let flow = Flow {
+            name: "wired-nested".to_string(),
+            nodes: vec![
+                request_flow_node("a", "https://api.example.com/a"),
+                saved_flow_node("b", "req.yml"),
+            ],
+            edges: vec![wire("e1", "a", "b")],
+            callback_host: None,
+        };
+        let saved = Request::new("B", HttpMethod::Get, "{{baseUrl}}/b");
+        let executor = RecordingExecutor::new();
+        executor.set_body("api.example.com/a", "https://api.example.com/b?page=2");
+        let exec = exec_with_vars(
+            &executor,
+            &[("baseUrl", "https://{{host}}"), ("host", "api.example.com")],
+        );
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(
+                FakeCollectionRepo::new()
+                    .with_request("my-api", "req.yml", saved)
+                    .build(),
+            ),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service
+            .run(&exec, run_input("wired-nested"))
+            .await
+            .expect("run");
+
+        assert_eq!(step_of(&summary, "b").error, None);
+        assert!(
+            executor.sent_urls().iter().any(|u| u.contains("page=2")),
+            "{:?}",
+            executor.sent_urls()
         );
     }
 

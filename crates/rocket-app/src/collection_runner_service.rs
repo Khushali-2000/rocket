@@ -719,6 +719,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runner_fills_a_nested_env_value() {
+        let mut collection = Collection::new("my-api");
+        let mut r = Request::new("First", HttpMethod::Get, "{{baseUrl}}/x");
+        r.file_name = Some("first.yml".to_string());
+        r.headers
+            .push(rocket_shared::types::Header::new("X-B", "{{baseUrl}}"));
+        collection.root.add_request(r);
+        let repo = InMemoryCollectionRepo::new(collection);
+        let executor = RecordingExecutor::new();
+        let mut env = Environment::new("dev");
+        env.set_variable(rocket_environment::Variable::new(
+            "baseUrl",
+            "https://{{host}}",
+        ));
+        env.set_variable(rocket_environment::Variable::new("host", "api.test"));
+        let exec = RequestExecutionService::new(
+            Box::new(StaticEnvRepo(env)),
+            Arc::new(SharedExecutor(Arc::clone(&executor))),
+            Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(NullCookieRepo),
+            Box::new(rocket_shared::events::NullEventPublisher),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        );
+        let runner = CollectionRunnerService::new(
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(rocket_shared::events::NullEventPublisher),
+        );
+        let mut input = sample_run_input();
+        input.environment_name = Some("dev".to_string());
+        runner.run(&exec, input).await.expect("run");
+        assert_eq!(executor.sent_urls(), vec!["https://api.test/x".to_string()]);
+        let headers = executor.sent_headers();
+        let value = headers[0]
+            .iter()
+            .find(|h| h.key == "X-B")
+            .map(|h| h.value.as_str());
+        assert_eq!(value, Some("https://api.test"));
+    }
+
+    #[tokio::test]
     async fn a_script_write_with_a_vault_secret_is_held_back_in_runner_mode() {
         // The vault write guard runs in `begin_phases`, which the runner shares with `execute`.
         let mut collection = Collection::new("my-api");
@@ -1040,7 +1083,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_placeholder_inside_a_variable_value_is_not_filled_by_the_runtime_pass() {
+    async fn a_collection_var_the_pre_request_script_wrote_fills_the_same_step() {
+        let mut collection = Collection::new("my-api");
+        let mut first = req("First", "first.yml");
+        first.url = "https://api.test/first/{{C}}".into();
+        collection.root.add_request(first);
+
+        let engine = ProgrammableEngine::new();
+        engine.on(
+            "First",
+            "before-request",
+            ScriptResult {
+                collection_var_writes: vec![rocket_scripting::CollectionVarWrite {
+                    key: "C".to_string(),
+                    value: serde_json::json!("c1"),
+                }],
+                ..Default::default()
+            },
+        );
+        let h = harness(collection, engine, RecordingExecutor::new());
+        h.runner
+            .run(&h.exec, sample_run_input())
+            .await
+            .expect("run");
+
+        assert_eq!(
+            h.executor.sent_urls(),
+            vec!["https://api.test/first/c1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_name_inside_a_variable_value_is_filled_by_the_send() {
         let mut collection = Collection::new("my-api");
         collection.settings.variables = vec![
             rocket_collection::CollectionVariable {
@@ -1081,10 +1155,10 @@ mod tests {
             .await
             .expect("run");
 
-        // The secret named inside the value of `next` stays a literal placeholder.
+        // A stored value is filled with stored names, and the runtime value is put in as it is.
         assert_eq!(
             h.executor.sent_urls()[1],
-            "https://evil.test/?k={{apiKey}}&t=abc123"
+            "https://evil.test/?k=col-secret-123456&t=abc123"
         );
     }
 

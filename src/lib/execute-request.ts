@@ -1,4 +1,9 @@
-import { buildMaskOptions, collectSecretValues, maskHttpExchange } from '@/lib/console-redaction';
+import {
+  buildMaskOptions,
+  collectSecretValues,
+  REDACTION_MARKER as MASK,
+  maskHttpExchange,
+} from '@/lib/console-redaction';
 import { dispatchSend, type ResolvedGraphQl } from '@/lib/dispatch-send';
 import { inheritedHeaders, loadFolderChain } from '@/lib/folder-inheritance';
 import { parseGraphQlResponse } from '@/lib/graphql-response';
@@ -39,11 +44,7 @@ import {
   type RequestGuardPolicy,
 } from '@/lib/tauri-api';
 import { applyPathParams, parseQueryParams, splitUrl } from '@/lib/url-params';
-import {
-  buildVariableContext,
-  resolveWithContext,
-  withoutScriptRuntimeVars,
-} from '@/lib/variable-context';
+import { buildVariableContext, processEnvOnly, resolveWithContext } from '@/lib/variable-context';
 import { useCollectionAuthStore } from '@/stores/collection-auth-store';
 import { useConsoleStore } from '@/stores/console-store';
 import { useEnvStore } from '@/stores/env-store';
@@ -145,6 +146,14 @@ function dotEnvValues(env: ProcessEnv): string[] {
   return env.dotEnvKeys.flatMap((k) => (env.vars[k] === undefined ? [] : [env.vars[k]]));
 }
 
+// Base64 of the UTF-8 bytes, so text outside Latin-1 does not make btoa throw.
+function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 // Returns the synthetic request header(s) that the Rust executor adds for a
 // given Auth value, so the console can show the full set of sent headers.
 // Only covers auth schemes that produce a deterministic header on the frontend;
@@ -154,8 +163,16 @@ export function authToConsoleHeaders(auth: Auth): { key: string; value: string }
     case 'bearer':
       return [{ key: 'Authorization', value: `Bearer ${auth.token}` }];
     case 'basic': {
-      const encoded = btoa(`${auth.username}:${auth.password}`);
-      return [{ key: 'Authorization', value: `Basic ${encoded}` }];
+      // A masked vault credential cannot be encoded back, so the whole value stays masked.
+      if (auth.username.includes(MASK) || auth.password.includes(MASK)) {
+        return [{ key: 'Authorization', value: `Basic ${MASK}` }];
+      }
+      return [
+        {
+          key: 'Authorization',
+          value: `Basic ${utf8ToBase64(`${auth.username}:${auth.password}`)}`,
+        },
+      ];
     }
     case 'api-key':
       if (auth.placement === 'header') {
@@ -248,7 +265,13 @@ export function toApiAuth(auth: AuthState, resolve = (s: string) => s): Auth {
   }
 }
 
-export function toApiBody(body: BodyState, resolve = (s: string) => s): Body | undefined {
+// `resolveStructural` fills the form keys and the binary file path. The backend never resolves
+// these, so they are filled with the full context even when `resolve` leaves placeholders.
+export function toApiBody(
+  body: BodyState,
+  resolve = (s: string) => s,
+  resolveStructural = resolve,
+): Body | undefined {
   if (body.mode === 'none') return undefined;
   if (body.mode === 'formdata' || body.mode === 'formurlencoded') {
     return {
@@ -260,7 +283,7 @@ export function toApiBody(body: BodyState, resolve = (s: string) => s): Body | u
           const isMultipart = body.mode === 'formdata';
           const contentType = isMultipart ? e.contentType?.trim() : undefined;
           return {
-            key: resolve(e.key),
+            key: resolveStructural(e.key),
             value: resolve(e.value),
             entryType:
               isMultipart && e.entryType === 'file' ? ('file' as const) : ('text' as const),
@@ -271,7 +294,10 @@ export function toApiBody(body: BodyState, resolve = (s: string) => s): Body | u
     };
   }
   if (body.mode === 'binary') {
-    return { mode: 'binary', filePath: body.filePath ? resolve(body.filePath) : undefined };
+    return {
+      mode: 'binary',
+      filePath: body.filePath ? resolveStructural(body.filePath) : undefined,
+    };
   }
   return { mode: body.mode as Body['mode'], content: resolve(body.content) };
 }
@@ -326,10 +352,11 @@ async function getSecretScope(
 // substitution, regardless of whether the request came from an open
 // tab or a tree walk over getCollection().
 //
-// `forSend` is set by the paths that send the request with its pre-request script (the
-// single send and the runner). Only they leave names the script sets as placeholders for the
-// backend. A cURL copy, a load test or an introspection call runs no script, so they resolve
-// those names from their scopes as before.
+// `forSend` is set by the paths that send the request with its scripts (the single send and
+// the runner). For them only the process.env names, which the frontend owns, are filled.
+// Every other name reaches the backend as written, and the backend fills it after the
+// scripts ran. A cURL copy, a load test, an introspection call or a send with no collection
+// runs no script, so they fill every name as before.
 export async function resolveRequestFieldsForPath(
   collection: string | undefined,
   requestPath: string | undefined,
@@ -389,11 +416,15 @@ export async function resolveRequestFieldsForPath(
     [secretScope.variables, collectionVars, folderVars, requestVars],
     dotEnvValues(processEnv),
   );
-  // A name the pre-request script sets with rok.setVar stays a placeholder in the request
-  // fields, so the backend fills it with the script's value (runtime wins) after the script.
+  // A send that runs scripts fills only process.env names here. The backend fills the rest
+  // after the scripts ran, so a script's write reaches the request (runtime wins). A send
+  // without a collection has no scripts, and the backend cannot find the active environment
+  // of a collection, so the frontend fills every name for it.
   const runsScript =
-    forSend && (request.requestType === 'http' || request.requestType === 'graphql');
-  const fieldCtx = runsScript ? withoutScriptRuntimeVars(ctx, request.preRequestScript) : ctx;
+    forSend &&
+    !!collection &&
+    (request.requestType === 'http' || request.requestType === 'graphql');
+  const fieldCtx = runsScript ? processEnvOnly(ctx) : ctx;
   const resolve = (text: string) => resolveWithContext(text, fieldCtx);
 
   // The url bar is the source of the query: the params table re-parses it only after a
@@ -425,7 +456,9 @@ export async function resolveRequestFieldsForPath(
     .filter((h) => h.enabled)
     .map((h) => ({ key: resolve(h.key), value: resolve(h.value), enabled: h.enabled }));
 
-  const resolvedBody = toApiBody(request.body, resolve);
+  // Form keys and the binary file path are never resolved by the backend, so they always get
+  // the full context.
+  const resolvedBody = toApiBody(request.body, resolve, (text) => resolveWithContext(text, ctx));
 
   let authToResolve: AuthState = request.auth;
   if (request.auth.authType === 'inherit' && collection) {
@@ -760,11 +793,6 @@ export async function sendRequest(tabId: string, request: RequestState): Promise
   const globalEnvName = getActiveGlobalEnvName();
   const requestName = found?.tab.title ?? resolvedUrl;
   const requestGuardPolicy = await getActiveWorkspaceRequestGuardPolicy();
-  const maskOptions = buildMaskOptions(
-    resolvedAuth,
-    resolvedSecretValues ?? [],
-    secretsUncertain ?? false,
-  );
 
   try {
     const requestInput: ExecuteRequestInput = {
@@ -840,80 +868,96 @@ export async function sendRequest(tabId: string, request: RequestState): Promise
       );
     }
 
-    // Merge auth-synthesized headers with explicit headers for the console.
-    // Auth headers (Bearer, Basic, API Key) are injected by reqwest at the Rust
-    // level and never appear in effectiveHeaders — add them here so the console
-    // shows the full set of headers actually sent on the wire.
-    const authHeaders = authToConsoleHeaders(resolvedAuth);
-    const explicitKeys = new Set(effectiveHeaders.map((h) => h.key.toLowerCase()));
-    const consoleRequestHeaders = [
-      ...authHeaders.filter((h) => !explicitKeys.has(h.key.toLowerCase())),
-      ...effectiveHeaders.map((h) => ({ key: h.key, value: h.value })),
-    ];
-    const consoleUrl = applyPathParams(resolvedUrl, resolvedPathParams);
-    const consoleRequestBody = isGraphQl
-      ? JSON.stringify({
-          query: resolvedGraphql?.query,
-          operationName: effectiveRequest.graphql?.operationName,
-          variables: resolvedGraphql?.variables,
-        })
-      : (resolvedBody?.content ?? '');
-    const consoleResponseHeaders = result.headers.map((h) => ({ key: h.key, value: h.value }));
-    const consoleResponseBody = result.isBinary
-      ? `(binary, ${result.sizeBytes} bytes)`
-      : result.body;
-    const redaction = maskHttpExchange(
-      {
+    // A Console bug must never replace the response that is already shown.
+    try {
+      // The Console row shows the request the backend sent (`sentRequest`), so a script's writes
+      // show in it. Auth headers (Bearer, Basic, API Key) are injected at the Rust level and are
+      // not in the sent headers, so they are added here from the sent auth. Without `sentRequest`
+      // (an older backend) the row falls back to the input fields (effectiveHeaders, resolvedAuth).
+      const sent = result.sentRequest;
+      const rowAuth = sent?.auth ?? resolvedAuth;
+      const rowHeaders = sent?.headers ?? effectiveHeaders;
+      const maskOptions = buildMaskOptions(
+        rowAuth,
+        [...(resolvedSecretValues ?? []), ...(sent?.secretValues ?? [])],
+        secretsUncertain ?? false,
+      );
+      const authHeaders = authToConsoleHeaders(rowAuth);
+      const explicitKeys = new Set(rowHeaders.map((h) => h.key.toLowerCase()));
+      const consoleRequestHeaders = [
+        ...authHeaders.filter((h) => !explicitKeys.has(h.key.toLowerCase())),
+        ...rowHeaders.map((h) => ({ key: h.key, value: h.value })),
+      ];
+      const consoleUrl = sent?.url ?? applyPathParams(resolvedUrl, resolvedPathParams);
+      const inputBody = isGraphQl
+        ? JSON.stringify({
+            query: resolvedGraphql?.query,
+            operationName: effectiveRequest.graphql?.operationName,
+            variables: resolvedGraphql?.variables,
+          })
+        : (resolvedBody?.content ?? '');
+      const consoleRequestBody = sent
+        ? sent.body?.content || (isGraphQl ? inputBody : '')
+        : inputBody;
+      const consoleResponseHeaders = result.headers.map((h) => ({ key: h.key, value: h.value }));
+      const consoleResponseBody = result.isBinary
+        ? `(binary, ${result.sizeBytes} bytes)`
+        : result.body;
+      const redaction = maskHttpExchange(
+        {
+          url: consoleUrl,
+          requestHeaders: consoleRequestHeaders,
+          requestBody: consoleRequestBody,
+          responseHeaders: consoleResponseHeaders,
+          responseBody: consoleResponseBody,
+        },
+        maskOptions,
+      );
+      useConsoleStore.getState().addHttpEntry({
+        method: effectiveRequest.method,
         url: consoleUrl,
+        status: result.status,
+        statusText: result.statusText,
+        durationMs: result.durationMs,
+        sizeBytes: result.sizeBytes,
         requestHeaders: consoleRequestHeaders,
         requestBody: consoleRequestBody,
         responseHeaders: consoleResponseHeaders,
         responseBody: consoleResponseBody,
-      },
-      maskOptions,
-    );
-    useConsoleStore.getState().addHttpEntry({
-      method: effectiveRequest.method,
-      url: consoleUrl,
-      status: result.status,
-      statusText: result.statusText,
-      durationMs: result.durationMs,
-      sizeBytes: result.sizeBytes,
-      requestHeaders: consoleRequestHeaders,
-      requestBody: consoleRequestBody,
-      responseHeaders: consoleResponseHeaders,
-      responseBody: consoleResponseBody,
-      masked: redaction.masked,
-      uncertain: redaction.uncertain,
-    });
-    // Forward script console.log/warn/error entries to the Console panel, in
-    // one update so they keep their original chronological order (a per-entry
-    // prepend loop would reverse them).
-    useConsoleStore.getState().addScriptEntries(
-      result.consoleEntries.map((entry) => ({
-        level: entry.level,
-        message: entry.message,
-        requestName,
-      })),
-    );
-    // A thrown script error is otherwise invisible — surface it in the Console
-    // panel too, alongside any console.log/warn/error output from the same run.
-    if (result.scriptError) {
-      useConsoleStore.getState().addScriptEntry({
-        level: 'error',
-        message: result.scriptError,
-        requestName,
+        masked: redaction.masked,
+        uncertain: redaction.uncertain,
       });
+      // Forward script console.log/warn/error entries to the Console panel, in
+      // one update so they keep their original chronological order (a per-entry
+      // prepend loop would reverse them).
+      useConsoleStore.getState().addScriptEntries(
+        result.consoleEntries.map((entry) => ({
+          level: entry.level,
+          message: entry.message,
+          requestName,
+        })),
+      );
+      // A thrown script error is otherwise invisible — surface it in the Console
+      // panel too, alongside any console.log/warn/error output from the same run.
+      if (result.scriptError) {
+        useConsoleStore.getState().addScriptEntry({
+          level: 'error',
+          message: result.scriptError,
+          requestName,
+        });
+      }
+      // Forward rok.test() results to the Console panel.
+      useConsoleStore.getState().addTestEntries(
+        result.testResults.map((t) => ({
+          name: t.name,
+          status: t.status,
+          error: t.error,
+          requestName,
+        })),
+      );
+    } catch (consoleError) {
+      console.error('Could not write the Console entries.', consoleError);
     }
-    // Forward rok.test() results to the Console panel.
-    useConsoleStore.getState().addTestEntries(
-      result.testResults.map((t) => ({
-        name: t.name,
-        status: t.status,
-        error: t.error,
-        requestName,
-      })),
-    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     usePaneStore.getState().setResponse(tabId, {
@@ -937,7 +981,7 @@ export async function sendRequest(tabId: string, request: RequestState): Promise
         responseHeaders: [],
         responseBody: msg,
       },
-      maskOptions,
+      buildMaskOptions(resolvedAuth, resolvedSecretValues ?? [], secretsUncertain ?? false),
     );
     useConsoleStore.getState().addHttpEntry({
       method: effectiveRequest.method,

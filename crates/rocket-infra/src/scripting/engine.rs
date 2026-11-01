@@ -1283,7 +1283,7 @@ mod tests {
 
     // ── runRequest ───────────────────────────────────────────────────────────
 
-    use rocket_scripting::{HostRunOutcome, HostRunRequest, HostScopes};
+    use rocket_scripting::{HostRunOutcome, HostRunRequest, HostScopes, PendingWrites};
 
     /// Host that answers `rok.runRequest` with a fixed outcome and records the calls.
     struct RunHost {
@@ -1416,6 +1416,39 @@ mod tests {
             .console_entries
             .iter()
             .all(|c| !c.message.contains(nested_secret)));
+    }
+
+    #[tokio::test]
+    async fn run_request_passes_the_scripts_unsaved_writes() {
+        let host = RunHost::answering(Ok(ran(200, "{}")));
+        let ctx = minimal_ctx(
+            "rok.setEnvVar('U', 'alice'); rok.deleteEnvVar('E'); rok.setEnvVar('E', 'back'); \
+             rok.setGlobalEnvVar('G', 'g'); rok.setCollectionVar('C', 7); \
+             await rok.runRequest('ping');",
+        );
+        let result = DenoScriptEngine::new()
+            .execute_with_host(ctx, &host)
+            .await
+            .expect("execute");
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let seen = host.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].pending,
+            PendingWrites {
+                env: vec![
+                    ("U".to_string(), Some("alice".to_string())),
+                    ("E".to_string(), None),
+                    ("E".to_string(), Some("back".to_string())),
+                ],
+                global_env: vec![("G".to_string(), Some("g".to_string()))],
+                collection: vec![("C".to_string(), Some("7".to_string()))],
+            }
+        );
+        // The writes stay in the output, so the caller still saves them.
+        assert_eq!(result.env_var_writes.len(), 3);
+        assert_eq!(result.global_env_var_writes.len(), 1);
+        assert_eq!(result.collection_var_writes.len(), 1);
     }
 
     #[tokio::test]

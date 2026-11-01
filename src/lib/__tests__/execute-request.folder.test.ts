@@ -5,16 +5,20 @@ import type { AuthState, RequestState } from '@/types/pane-types';
 const state = vi.hoisted(() => ({
   folders: new Map<string, unknown>(),
   collectionAuth: undefined as unknown,
+  tokenSecret: false,
 }));
 
 vi.mock('@/lib/tauri-api', () => ({
   getCollectionSettings: vi.fn(async () => ({
-    variables: [{ key: 'token', value: 'tok-123', initialValue: '', enabled: true, secret: false }],
+    variables: [
+      { key: 'token', value: 'tok-123', initialValue: '', enabled: true, secret: state.tokenSecret },
+    ],
     headers: [
       { key: 'X-Team', value: 'core', enabled: true },
       { key: 'X-Env', value: 'collection', enabled: true },
     ],
   })),
+  getProcessEnvVars: vi.fn(async () => ({ vars: { HOST_NAME: 'h1' }, dotEnvKeys: [] })),
   getFolderChainVariables: vi.fn(async () => []),
   getRequestVariables: vi.fn(async () => []),
   getFolderSettings: vi.fn(async (_collection: string, folderPath: string) => {
@@ -36,7 +40,10 @@ vi.mock('@/stores/collection-auth-store', () => ({
 }));
 
 vi.mock('@/lib/query-client', () => ({
-  getQueryClient: () => ({ getQueryData: () => undefined }),
+  getQueryClient: () => ({
+    getQueryData: () => undefined,
+    fetchQuery: (opts: { queryFn: () => unknown }) => opts.queryFn(),
+  }),
 }));
 
 import { resolveRequestFieldsForPath } from '@/lib/execute-request';
@@ -75,50 +82,85 @@ function request(overrides: Partial<RequestState> = {}): RequestState {
 const values = (headers: { key: string; value: string }[], key: string) =>
   headers.filter((h) => h.key.toLowerCase() === key.toLowerCase()).map((h) => h.value);
 
-describe('resolveRequestFieldsForPath with a pre-request rok.setVar', () => {
+describe('resolveRequestFieldsForPath for a send', () => {
   beforeEach(() => {
     state.folders.clear();
     state.collectionAuth = undefined;
+    state.tokenSecret = false;
   });
 
-  it('leaves a name the script sets as a placeholder for the backend', async () => {
+  it('a_send_keeps_env_placeholders_for_the_backend', async () => {
     const resolved = await resolveRequestFieldsForPath(
       'api',
       PATH,
       request({
         url: 'https://api.example.com/{{token}}',
-        headers: [{ id: '1', key: 'X-T', value: '{{token}}', enabled: true }],
-        preRequestScript: "rok.setVar('token', 'fresh');",
+        headers: [{ id: '1', key: 'X-T', value: 'Bearer {{token}}', enabled: true }],
+        body: { mode: 'json', content: '{"t":"{{token}}"}', formData: [] },
       }),
       true,
     );
     expect(resolved.url).toBe('https://api.example.com/{{token}}');
-    expect(values(resolved.headers, 'X-T')).toEqual(['{{token}}']);
+    expect(values(resolved.headers, 'X-T')).toEqual(['Bearer {{token}}']);
+    expect(resolved.body?.content).toBe('{"t":"{{token}}"}');
   });
 
-  it('resolves the name for a path that runs no script, such as a cURL copy', async () => {
+  it('a_send_fills_process_env_names', async () => {
     const resolved = await resolveRequestFieldsForPath(
       'api',
       PATH,
-      request({
-        url: 'https://api.example.com/{{token}}',
-        preRequestScript: "rok.setVar('token', 'fresh');",
-      }),
+      request({ url: 'https://{{process.env.HOST_NAME}}/{{token}}' }),
+      true,
     );
-    expect(resolved.url).toBe('https://api.example.com/tok-123');
+    expect(resolved.url).toBe('https://h1/{{token}}');
   });
 
-  it('resolves the name as before when no script sets it', async () => {
+  it('a_graphql_send_keeps_env_placeholders', async () => {
     const resolved = await resolveRequestFieldsForPath(
       'api',
       PATH,
       request({
-        url: 'https://api.example.com/{{token}}',
-        preRequestScript: "rok.setVar('other', 'x');",
+        requestType: 'graphql',
+        graphql: {
+          query: 'query { user(id: "{{token}}") { id } }',
+          variables: '{"t":"{{token}}"}',
+        },
       }),
       true,
     );
+    expect(resolved.graphql?.query).toBe('query { user(id: "{{token}}") { id } }');
+    expect(resolved.graphql?.variables).toBe('{"t":"{{token}}"}');
+  });
+
+  it('a_path_that_runs_no_script_fills_every_name', async () => {
+    const resolved = await resolveRequestFieldsForPath(
+      'api',
+      PATH,
+      request({ url: 'https://api.example.com/{{token}}' }),
+    );
     expect(resolved.url).toBe('https://api.example.com/tok-123');
+  });
+
+  it('a_send_still_collects_the_secret_values', async () => {
+    state.tokenSecret = true;
+    const resolved = await resolveRequestFieldsForPath(
+      'api',
+      PATH,
+      request({ url: 'https://api.example.com/{{token}}' }),
+      true,
+    );
+    expect(resolved.url).toBe('https://api.example.com/{{token}}');
+    expect(resolved.secretValues).toContain('tok-123');
+  });
+
+  it('assertion_values_are_still_filled_for_a_send', async () => {
+    const resolved = await resolveRequestFieldsForPath(
+      'api',
+      PATH,
+      request({ assertions: [{ expression: 'res.body.t', operator: 'eq', value: '{{token}}' }] }),
+      true,
+    );
+    expect(resolved.assertions[0]?.value).toBe('tok-123');
   });
 });
 

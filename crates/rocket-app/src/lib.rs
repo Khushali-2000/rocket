@@ -119,7 +119,7 @@ pub use execution_service::websocket_resolution::{
     WebSocketConnectInput, WebSocketScope, WebSocketSendInput,
 };
 pub use execution_service::{
-    DotEnvStatus, ExecuteRequestInput, ExecuteRequestOutput, RequestExecutionService,
+    DotEnvStatus, ExecuteRequestInput, ExecuteRequestOutput, RequestExecutionService, SentRequest,
 };
 pub use export_service::{ExportFormat, ExportService};
 pub use flow_auth::{

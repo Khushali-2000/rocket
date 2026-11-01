@@ -8,6 +8,7 @@ pub mod environment;
 pub mod external_secret;
 pub mod flatten;
 mod invalid;
+pub mod nested;
 pub mod repository;
 pub mod resolver;
 pub mod secret_manager;
@@ -28,6 +29,9 @@ pub use external_secret::{ExternalSecretBinding, ExternalSecretRef};
 pub use flatten::{
     find_extends_cycle, flatten_environment, flatten_with_repo, FlatBinding, FlatCertificate,
     FlatVariable, Flattened,
+};
+pub use nested::{
+    expand_nested, expand_nested_recording, MAX_NESTED_BYTES, MAX_NESTED_DEPTH, MAX_NESTED_WORK,
 };
 pub use repository::{EnvironmentRepository, EnvironmentRepositoryFactory};
 pub use resolver::{resolve, resolve_with_env, ResolveResult};

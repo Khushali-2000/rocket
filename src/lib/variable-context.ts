@@ -40,27 +40,10 @@ export function buildVariableContext(params: {
   return ctx;
 }
 
-const SET_VAR_REGEX = /\brok\.setVar\(\s*(['"`])([^'"`\n]+)\1/g;
-
-// Names a script sets with a literal rok.setVar('name', ...) call. A name built at run
-// time cannot be seen here.
-export function scriptRuntimeVarNames(script: string | undefined): Set<string> {
-  const names = new Set<string>();
-  if (!script) return names;
-  for (const match of script.matchAll(SET_VAR_REGEX)) names.add(match[2].trim());
-  return names;
-}
-
-// The context without the names the request's pre-request script sets. Their placeholders
-// then reach the backend as written, and the backend fills them with the runtime value
-// after the script ran, the same way it does for runner and Flow sends.
-export function withoutScriptRuntimeVars(
-  ctx: Record<string, string>,
-  script: string | undefined,
-): Record<string, string> {
-  const names = scriptRuntimeVarNames(script);
-  if (names.size === 0) return ctx;
-  return Object.fromEntries(Object.entries(ctx).filter(([key]) => !names.has(key)));
+// The entries the frontend owns for a send that runs scripts: the process.env names. Every
+// other name reaches the backend as written and is filled there after the scripts ran.
+export function processEnvOnly(ctx: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(ctx).filter(([key]) => key.startsWith('process.env.')));
 }
 
 // Replace every {{var}} placeholder in template using the provided context.

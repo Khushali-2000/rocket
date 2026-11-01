@@ -60,6 +60,14 @@ pub(crate) struct ExecutionScriptHost<'a> {
     pub(crate) nested_process_env_values: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Set when a nested run sent a `process.env` value the gate withheld.
     pub(crate) nested_withheld: Arc<std::sync::atomic::AtomicBool>,
+    /// Set just before a nested run starts, so the calling phase reloads the scopes it saved.
+    pub(crate) nested_ran: Arc<std::sync::atomic::AtomicBool>,
+    /// Masked forms of the RocketVault values. An inherited value holding one is never laid
+    /// into a scope.
+    pub(crate) vault_forms: Vec<String>,
+    /// The unsaved writes this run got from its caller, passed on to a nested run first.
+    /// A nested run that changes a key drops it from this list.
+    pub(crate) pending: std::sync::Mutex<rocket_scripting::PendingWrites>,
 }
 
 /// Turns an executor response into what a script sees.
@@ -203,17 +211,43 @@ impl ScriptHost for ExecutionScriptHost<'_> {
         chain.push(target);
         // The scopes as stored now, so the engine can tell what the nested run changed.
         let before = self.stored_scopes(collection);
+        // Set before the run, so a run that fails after saving a write still triggers a reload.
+        self.nested_ran.store(true, Ordering::SeqCst);
         // Boxed, because this future holds another run of the same pipeline.
-        let (output, runtime) = Box::pin(self.svc.execute_nested(
+        // The inherited writes come first, so the script's own writes win.
+        // A poisoned lock still holds the writes.
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        pending.env.extend(request.pending.env.iter().cloned());
+        pending
+            .global_env
+            .extend(request.pending.global_env.iter().cloned());
+        pending
+            .collection
+            .extend(request.pending.collection.iter().cloned());
+        let run = Box::pin(self.svc.execute_nested(
             nested,
             &self.external_secrets,
             chain,
             &request.runtime_vars,
+            &pending,
             &self.unresolved_aliases,
             &self.active_runs,
         ))
-        .await
-        .map_err(|e| HostError::Failed(format!("rok.runRequest: {e}")))?;
+        .await;
+        let (output, runtime) = match run {
+            Ok(done) => done,
+            Err(e) => {
+                // The failed run may have saved a write first, so the inherited list is
+                // pruned against storage here too.
+                let after = self.stored_scopes(collection);
+                let _ = self.keep_inherited(before, after);
+                return Err(HostError::Failed(format!("rok.runRequest: {e}")));
+            }
+        };
         // The nested run saved its writes, so the scopes are read back from storage.
         let scopes = self.stored_scopes(collection);
         // A poisoned lock still holds the values, and they must be masked.
@@ -227,6 +261,7 @@ impl ScriptHost for ExecutionScriptHost<'_> {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let (runtime_set, runtime_removed) = runtime_changes(&request.runtime_vars, &runtime);
+        let (before, scopes) = self.keep_inherited(before, scopes);
         Ok(HostRunOutcome {
             response: Some(host_response(&output.response)),
             runtime_set,
@@ -278,6 +313,61 @@ impl ScriptHost for ExecutionScriptHost<'_> {
 }
 
 impl ExecutionScriptHost<'_> {
+    /// Drops the inherited writes whose key the nested run changed, because the later write
+    /// wins. The rest are laid over both scope maps, so the script keeps reading them.
+    fn keep_inherited(
+        &self,
+        mut before: HostScopes,
+        mut scopes: HostScopes,
+    ) -> (HostScopes, HostScopes) {
+        let vault_forms = &self.vault_forms;
+        let mut inherited = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let keep = |list: &mut Vec<(String, Option<String>)>,
+                    before: &mut HashMap<String, String>,
+                    after: &mut HashMap<String, String>,
+                    selected: bool| {
+            list.retain(|(key, _)| before.get(key) == after.get(key));
+            if !selected {
+                return;
+            }
+            for (key, value) in list.iter() {
+                // Such a value stays in the list, and a nested run holds it back itself.
+                if value
+                    .as_deref()
+                    .is_some_and(|v| crate::redaction::contains_secret(v, vault_forms))
+                {
+                    continue;
+                }
+                for map in [&mut *before, &mut *after] {
+                    match value {
+                        Some(v) => map.insert(key.clone(), v.clone()),
+                        None => map.remove(key),
+                    };
+                }
+            }
+        };
+        let input = self.input;
+        keep(
+            &mut inherited.env,
+            &mut before.env,
+            &mut scopes.env,
+            input.environment_name.is_some(),
+        );
+        keep(
+            &mut inherited.global_env,
+            &mut before.global_env,
+            &mut scopes.global_env,
+            input.global_env_name.is_some(),
+        );
+        keep(
+            &mut inherited.collection,
+            &mut before.collection,
+            &mut scopes.collection,
+            input.collection.is_some(),
+        );
+        (before, scopes)
+    }
+
     /// The env, global and collection scopes as they are stored right now.
     fn stored_scopes(&self, collection: &str) -> HostScopes {
         let scopes = self.svc.build_variable_scopes(

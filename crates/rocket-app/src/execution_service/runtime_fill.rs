@@ -95,9 +95,10 @@ impl FieldTemplate {
         }
     }
 
-    /// The text again, with each placeholder that names a key of `runtime` set to that value.
-    /// A `$dynamic` name is never replaced, and every other placeholder keeps its first value.
-    pub(crate) fn render(&self, runtime: &HashMap<String, String>) -> String {
+    /// The text again: a placeholder whose name is in `overrides.values` gets that value, one
+    /// whose name was removed gets its placeholder text back, and every other placeholder keeps
+    /// its first value. A `$dynamic` name is never replaced.
+    pub(crate) fn render(&self, overrides: &Overrides) -> String {
         let pick = |index: usize, placeholder: &str| -> String {
             let name = self
                 .names
@@ -105,8 +106,11 @@ impl FieldTemplate {
                 .map(String::as_str)
                 .unwrap_or_default();
             if !name.starts_with('$') {
-                if let Some(value) = runtime.get(name) {
+                if let Some(value) = overrides.values.get(name) {
                     return value.clone();
+                }
+                if overrides.removed.contains(name) {
+                    return placeholder.to_string();
                 }
             }
             self.values
@@ -269,6 +273,59 @@ pub(crate) struct RequestTemplates {
     pub unresolved: HashSet<String>,
     /// Header keys, lower case, whose values are sent as written.
     pub literal_headers: HashSet<String>,
+    /// Each variable's stored value before any script ran, all scopes flattened, with no nested
+    /// name filled.
+    pub first_raw: HashMap<String, String>,
+    /// Each variable's value before any script ran, with the nested names of the stored scopes
+    /// filled. The second pass compares against it to find what the scripts changed.
+    pub first_values: HashMap<String, String>,
+    /// The `$dynamic` values the first pass made while it filled nested names, keyed with the
+    /// `$`. The second pass reuses them, so a dynamic value is made once per send.
+    pub nested_dynamic: HashMap<String, String>,
+}
+
+/// The values the pass after the pre-request scripts puts into placeholders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Overrides {
+    /// Names whose resolved value is new or changed since the first pass, every runtime name
+    /// included, except `$dynamic` and `process.env.` names.
+    pub values: HashMap<String, String>,
+    /// Names that resolved in the first pass and resolve to nothing now.
+    pub removed: HashSet<String>,
+}
+
+impl Overrides {
+    /// Every runtime value, each name whose value in `now` differs from `first`, and each name
+    /// `first` has and `now` lacks. `first` and `now` are flattened scopes, so scope order already
+    /// decided each value. `$dynamic` and `process.env.` names are never listed.
+    pub(crate) fn between(
+        first: &HashMap<String, String>,
+        now: &HashMap<String, String>,
+        runtime: &HashMap<String, String>,
+    ) -> Self {
+        let listed = |name: &str| !name.starts_with('$') && !name.starts_with("process.env.");
+        let mut values: HashMap<String, String> = runtime
+            .iter()
+            .filter(|(name, _)| listed(name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        for (name, value) in now {
+            if listed(name) && first.get(name) != Some(value) {
+                values.insert(name.clone(), value.clone());
+            }
+        }
+        let removed = first
+            .keys()
+            .filter(|name| listed(name) && !now.contains_key(*name))
+            .cloned()
+            .collect();
+        Self { values, removed }
+    }
+
+    /// Nothing changed since the first pass.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.removed.is_empty()
+    }
 }
 
 /// Matches the current key-value pairs to the templates in order, so that a pair a script
@@ -278,7 +335,7 @@ pub(crate) struct RequestTemplates {
 pub(crate) fn fill_pairs(
     pairs: &mut [(&mut String, &mut String)],
     templates: &[(FieldTemplate, FieldTemplate)],
-    runtime: &HashMap<String, String>,
+    overrides: &Overrides,
     script_vars: &HashMap<String, String>,
     literal_keys: &HashSet<String>,
 ) {
@@ -290,8 +347,8 @@ pub(crate) fn fill_pairs(
         match found {
             Some(offset) => {
                 let (k, v) = &templates[cursor + offset];
-                **key = k.render(runtime);
-                **value = v.render(runtime);
+                **key = k.render(overrides);
+                **value = v.render(overrides);
                 cursor += offset + 1;
             }
             None => {
@@ -315,13 +372,84 @@ mod tests {
             .collect()
     }
 
+    fn ov(pairs: &[(&str, &str)]) -> Overrides {
+        Overrides {
+            values: vars(pairs),
+            ..Overrides::default()
+        }
+    }
+
+    #[test]
+    fn render_puts_back_the_placeholder_of_a_removed_name() {
+        let v = vars(&[("token", "old"), ("keep", "k")]);
+        let mut unresolved = HashSet::new();
+        let t = FieldTemplate::record("{{ token }}|{{keep}}", false, &v, &mut unresolved);
+        assert_eq!(t.output, "old|k");
+        let overrides = Overrides {
+            removed: HashSet::from(["token".to_string()]),
+            ..Overrides::default()
+        };
+        assert_eq!(t.render(&overrides), "{{ token }}|k");
+    }
+
+    #[test]
+    fn render_in_json_text_fills_a_changed_name() {
+        let v = vars(&[("token", "old")]);
+        let mut unresolved = HashSet::new();
+        let t = FieldTemplate::record(r#"{"t":"{{token}}"}"#, true, &v, &mut unresolved);
+        assert_eq!(t.render(&ov(&[("token", "new")])), r#"{"t":"new"}"#);
+    }
+
+    #[test]
+    fn overrides_list_runtime_changed_new_and_removed_names() {
+        let first = vars(&[("a", "1"), ("b", "2"), ("gone", "x"), ("same", "s")]);
+        let now = vars(&[
+            ("a", "1"),
+            ("b", "20"),
+            ("fresh", "f"),
+            ("same", "s"),
+            ("r", "rv"),
+        ]);
+        let runtime = vars(&[("r", "rv")]);
+        let o = Overrides::between(&first, &now, &runtime);
+        assert_eq!(o.values, vars(&[("b", "20"), ("fresh", "f"), ("r", "rv")]));
+        assert_eq!(o.removed, HashSet::from(["gone".to_string()]));
+    }
+
+    #[test]
+    fn overrides_never_list_dynamic_or_process_env_names() {
+        let first = vars(&[("process.env.HOME", "/a"), ("$odd", "1")]);
+        let now = vars(&[("process.env.HOME", "/b"), ("process.env.NEW", "n")]);
+        let runtime = vars(&[("$guid", "x"), ("process.env.X", "y")]);
+        let o = Overrides::between(&first, &now, &runtime);
+        assert!(o.is_empty(), "{o:?}");
+    }
+
+    #[test]
+    fn a_higher_scope_hides_a_changed_env_value() {
+        use rocket_environment::VariableContext;
+        let mut ctx = VariableContext {
+            env: vars(&[("E", "old"), ("R", "env-r")]),
+            request: vars(&[("E", "req")]),
+            runtime: vars(&[("R", "rt")]),
+            ..VariableContext::default()
+        };
+        let first = ctx.flatten();
+        ctx.env.insert("E".into(), "new".into());
+        ctx.env.insert("R".into(), "env-r2".into());
+        let o = Overrides::between(&first, &ctx.flatten(), &ctx.runtime);
+        // Only the runtime name is listed, with its own value. E stays hidden by the request scope.
+        assert_eq!(o.values, vars(&[("R", "rt")]));
+        assert!(o.removed.is_empty());
+    }
+
     #[test]
     fn literal_template_renders_its_text_unchanged() {
         let text = "https://e.test/{{apiKey}}?v={{vault.secret}}&id={{$guid}}";
         let t = FieldTemplate::literal(text);
         assert_eq!(t.output, text);
         assert_eq!(
-            t.render(&vars(&[("apiKey", "x"), ("vault.secret", "s")])),
+            t.render(&ov(&[("apiKey", "x"), ("vault.secret", "s")])),
             text
         );
         assert_eq!(t.process_env_names().count(), 0);
@@ -355,7 +483,7 @@ mod tests {
             &mut unresolved,
         );
         let first_id = t.output.rsplit('=').next().unwrap_or_default().to_string();
-        let out = t.render(&vars(&[("token", "fresh"), ("vault.k", "secret")]));
+        let out = t.render(&ov(&[("token", "fresh"), ("vault.k", "secret")]));
         assert_eq!(
             out,
             format!("https://evil/{{{{vault.k}}}}?t=fresh&id={first_id}")

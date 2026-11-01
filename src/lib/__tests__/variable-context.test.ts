@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildVariableContext,
   resolveWithContext,
-  scriptRuntimeVarNames,
-  withoutScriptRuntimeVars,
+  processEnvOnly,
 } from '../variable-context';
 
 const cv = (key: string, value: string, initialValue?: string) => ({
@@ -125,21 +124,9 @@ describe('dynamic variables', () => {
   });
 });
 
-describe('scriptRuntimeVarNames', () => {
-  it('finds literal rok.setVar names in any quote style', () =>
+describe('processEnvOnly', () => {
+  it('keeps only the process.env entries', () =>
     expect(
-      scriptRuntimeVarNames(
-        "rok.setVar('a', 1);\nrok.setVar(\"b\", 2); rok.setVar( `c` , 3); rok.setVar(name, 4);",
-      ),
-    ).toEqual(new Set(['a', 'b', 'c'])));
-  it('ignores other setters', () =>
-    expect(scriptRuntimeVarNames("rok.setEnvVar('a', 1)").size).toBe(0));
-  it('leaves the context alone without a script', () => {
-    const ctx = { a: '1' };
-    expect(withoutScriptRuntimeVars(ctx, undefined)).toBe(ctx);
-  });
-  it('drops the set names from the context', () =>
-    expect(withoutScriptRuntimeVars({ a: '1', b: '2' }, "rok.setVar('a', 'x')")).toEqual({
-      b: '2',
-    }));
+      processEnvOnly({ 'process.env.HOME_DIR': '/h', token: 't', 'process.envx': 'n' }),
+    ).toEqual({ 'process.env.HOME_DIR': '/h' }));
 });

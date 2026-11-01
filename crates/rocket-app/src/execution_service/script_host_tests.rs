@@ -32,6 +32,12 @@ impl KeepingExecutor {
 impl HttpExecutor for KeepingExecutor {
     async fn execute(&self, request: &HttpRequest) -> DomainResult<HttpResponse> {
         self.seen.lock().expect("lock").push(request.clone());
+        // A URL with this marker fails to send, so a test can fail a nested run.
+        if request.url.contains("failing") {
+            return Err(rocket_shared::error::DomainError::Internal(
+                "connection refused".into(),
+            ));
+        }
         Ok(HttpResponse {
             status: 200,
             status_text: "OK".into(),
@@ -336,6 +342,29 @@ impl EnvironmentRepository for MemoryEnvRepo {
     }
 }
 
+/// Like `MemoryEnvRepo`, but `get` fails once the stored environment has a `break_reads` variable.
+struct BreakingEnvRepo(Arc<Mutex<Environment>>);
+
+impl EnvironmentRepository for BreakingEnvRepo {
+    fn list(&self) -> DomainResult<Vec<Environment>> {
+        Ok(vec![self.0.lock().expect("lock").clone()])
+    }
+    fn get(&self, _name: &str) -> DomainResult<Environment> {
+        let env = self.0.lock().expect("lock").clone();
+        if env.variables.iter().any(|v| v.key == "break_reads") {
+            return Err(DomainError::Io("disk gone".into()));
+        }
+        Ok(env)
+    }
+    fn save(&self, env: &Environment) -> DomainResult<()> {
+        *self.0.lock().expect("lock") = env.clone();
+        Ok(())
+    }
+    fn delete(&self, _name: &str) -> DomainResult<()> {
+        Ok(())
+    }
+}
+
 /// A saved GET request whose URL ends in its file name.
 fn saved(name: &str, file: &str, pre_request: &str) -> Request {
     let mut request = Request::new(name, HttpMethod::Get, format!("https://api.test/{file}"));
@@ -351,21 +380,46 @@ fn run_service(collection: Collection) -> (RequestExecutionService, Arc<KeepingE
     run_service_with_engine(collection, rocket_infra::scripting::DenoScriptEngine::new())
 }
 
+/// Environment `dev` holding `vars`, shared so a test can read what was saved.
+fn dev_env(vars: Vec<Variable>) -> Arc<Mutex<Environment>> {
+    let mut env = Environment::new("dev");
+    for var in vars {
+        env.set_variable(var);
+    }
+    Arc::new(Mutex::new(env))
+}
+
 /// Like `run_service`, with an engine that has the given limits.
 fn run_service_with_engine(
     collection: Collection,
     engine: rocket_infra::scripting::DenoScriptEngine,
 ) -> (RequestExecutionService, Arc<KeepingExecutor>) {
+    run_service_full(
+        InMemoryCollectionRepo::new(collection),
+        dev_env(vec![Variable::new("E", "old")]),
+        engine,
+    )
+}
+
+/// A service over `repo` and `env` with the real engine.
+fn run_service_over(
+    repo: Arc<InMemoryCollectionRepo>,
+    env: Arc<Mutex<Environment>>,
+) -> (RequestExecutionService, Arc<KeepingExecutor>) {
+    run_service_full(repo, env, rocket_infra::scripting::DenoScriptEngine::new())
+}
+
+fn run_service_full(
+    repo: Arc<InMemoryCollectionRepo>,
+    env: Arc<Mutex<Environment>>,
+    engine: rocket_infra::scripting::DenoScriptEngine,
+) -> (RequestExecutionService, Arc<KeepingExecutor>) {
     let executor = Arc::new(KeepingExecutor::default());
-    let mut env = Environment::new("dev");
-    env.set_variable(Variable::new("E", "old"));
     let svc = RequestExecutionService::new(
-        Box::new(MemoryEnvRepo(Arc::new(Mutex::new(env)))),
+        Box::new(MemoryEnvRepo(env)),
         Arc::new(SharedKeeping(Arc::clone(&executor))),
         Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
-        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
-            collection,
-        ))),
+        Box::new(SharedCollectionRepo(repo)),
         Box::new(NullCookieRepo),
         Box::new(NullEventPublisher),
         Box::new(EmptySecretManagerRepo),
@@ -373,6 +427,27 @@ fn run_service_with_engine(
         Arc::new(rocket_environment::NullVaultSecretFetcher),
     )
     .with_script_engine(Box::new(engine));
+    (svc, executor)
+}
+
+/// Like `run_service_over`, over `BreakingEnvRepo`.
+fn run_service_breaking(
+    repo: Arc<InMemoryCollectionRepo>,
+    env: Arc<Mutex<Environment>>,
+) -> (RequestExecutionService, Arc<KeepingExecutor>) {
+    let executor = Arc::new(KeepingExecutor::default());
+    let svc = RequestExecutionService::new(
+        Box::new(BreakingEnvRepo(env)),
+        Arc::new(SharedKeeping(Arc::clone(&executor))),
+        Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+        Box::new(SharedCollectionRepo(repo)),
+        Box::new(NullCookieRepo),
+        Box::new(NullEventPublisher),
+        Box::new(EmptySecretManagerRepo),
+        Arc::new(rocket_environment::NullSecretStore),
+        Arc::new(rocket_environment::NullVaultSecretFetcher),
+    )
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
     (svc, executor)
 }
 
@@ -406,11 +481,26 @@ fn urls(executor: &KeepingExecutor) -> Vec<String> {
 
 /// root: [main.yml with `main_script`], auth/ [login.yml with `login_pre`, `login_post`]
 fn main_and_login(main_script: &str, login_pre: &str, login_post: &str) -> Collection {
+    main_and_login_with(main_script, login_pre, login_post, &[], &[])
+}
+
+/// `main_and_login`, with headers on the main and login requests.
+fn main_and_login_with(
+    main_script: &str,
+    login_pre: &str,
+    login_post: &str,
+    main_headers: &[(&str, &str)],
+    login_headers: &[(&str, &str)],
+) -> Collection {
+    let headers = |list: &[(&str, &str)]| -> Vec<Header> {
+        list.iter().map(|(k, v)| Header::new(*k, *v)).collect()
+    };
     let mut collection = Collection::new("api");
-    collection
-        .root
-        .add_request(saved("Main", "main.yml", main_script));
+    let mut main = saved("Main", "main.yml", main_script);
+    main.headers = headers(main_headers);
+    collection.root.add_request(main);
     let mut login = saved("Login", "login.yml", login_pre);
+    login.headers = headers(login_headers);
     if !login_post.is_empty() {
         login.post_response_script = Some(login_post.to_string());
     }
@@ -418,6 +508,17 @@ fn main_and_login(main_script: &str, login_pre: &str, login_post: &str) -> Colle
     auth.add_request(login);
     collection.root.add_subfolder(auth);
     collection
+}
+
+/// The value of header `name` on the request sent at `index`.
+fn sent_header(executor: &KeepingExecutor, index: usize, name: &str) -> Option<String> {
+    executor
+        .seen()
+        .get(index)?
+        .headers
+        .iter()
+        .find(|h| h.key.eq_ignore_ascii_case(name))
+        .map(|h| h.value.clone())
 }
 
 #[tokio::test]
@@ -811,6 +912,153 @@ async fn run_request_nested_set_url_is_guarded_by_the_policy() {
     );
 }
 
+// ---- Second pass sees every scope ----
+
+#[tokio::test]
+async fn second_pass_fills_an_env_value_the_pre_request_script_wrote() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('E', 'new');",
+        "",
+        "",
+        &[("X-E", "{{E}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 0, "X-E").as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn second_pass_fills_a_global_value_that_did_not_exist_before() {
+    // The test repository serves one environment for every name, so `dev` is the global too.
+    let collection = main_and_login_with(
+        "rok.setGlobalEnvVar('G', 'g1');",
+        "",
+        "",
+        &[("X-G", "{{G}}")],
+        &[],
+    );
+    let mut input = send_input(&collection, "main.yml");
+    input.global_env_name = Some("dev".into());
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 0, "X-G").as_deref(), Some("g1"));
+}
+
+#[tokio::test]
+async fn second_pass_fills_a_collection_value_the_pre_request_script_wrote() {
+    let collection = main_and_login_with(
+        "rok.setCollectionVar('C', 'c1');",
+        "",
+        "",
+        &[("X-C", "{{C}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 0, "X-C").as_deref(), Some("c1"));
+}
+
+#[tokio::test]
+async fn second_pass_sends_a_deleted_name_as_written() {
+    let collection =
+        main_and_login_with("rok.deleteEnvVar('E');", "", "", &[("X-E", "{{E}}")], &[]);
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    svc.execute(input).await.expect("execute");
+    assert_eq!(sent_header(&executor, 0, "X-E").as_deref(), Some("{{E}}"));
+}
+
+#[tokio::test]
+async fn second_pass_keeps_a_dynamic_value_the_script_saw() {
+    let collection = main_and_login_with(
+        "console.log('id=' + req.getHeader('X-Id')); rok.setEnvVar('E', 'new');",
+        "",
+        "",
+        &[("X-Id", "{{$guid}}"), ("X-E", "{{E}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    let sent = sent_header(&executor, 0, "X-Id").expect("X-Id sent");
+    assert!(
+        console(&out).contains(&format!("id={sent}")),
+        "{:?}",
+        console(&out)
+    );
+    assert_eq!(sent_header(&executor, 0, "X-E").as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn second_pass_masks_a_new_secret_env_value() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('S', 'new-secret-value-2');",
+        "",
+        "",
+        &[("X-S", "{{S}}")],
+        &[],
+    );
+    let mut collection = collection;
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.post_response_script = Some("console.log('S=' + req.getHeader('X-S'));".into());
+    }
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::secret("S", "old-secret-value-1")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-S").as_deref(),
+        Some("new-secret-value-2")
+    );
+    let lines = console(&out);
+    assert!(lines.iter().any(|l| l.starts_with("S=")), "{lines:?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("new-secret-value-2")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn with_no_script_writes_only_runtime_names_are_overrides() {
+    let mut collection = main_and_login("", "", "");
+    collection
+        .settings
+        .variables
+        .push(rocket_collection::CollectionVariable {
+            key: "C".into(),
+            value: "c1".into(),
+            initial_value: String::new(),
+            enabled: true,
+            secret: false,
+        });
+    let mut input = send_input(&collection, "main.yml");
+    input.flow_vars.insert("F".into(), "f1".into());
+    let (svc, _executor) = run_service(collection);
+    let state = svc
+        .begin_phases(&input, &std::collections::HashMap::new())
+        .expect("begin");
+    assert_eq!(
+        state.templates.first_values.get("C").map(String::as_str),
+        Some("c1")
+    );
+    let overrides = super::runtime_fill::Overrides::between(
+        &state.templates.first_values,
+        &state.var_ctx.flatten(),
+        &state.var_ctx.runtime,
+    );
+    assert_eq!(
+        overrides.values,
+        std::collections::HashMap::from([("F".to_string(), "f1".to_string())])
+    );
+    assert!(overrides.removed.is_empty());
+}
+
 // ── nested runs and an unresolved RocketVault alias ──────────────────────────
 
 use rocket_environment::{
@@ -910,6 +1158,102 @@ fn login_uses_the_alias(collection: &mut Collection) {
             }
         }
     }
+}
+
+/// Every secret fetch returns the same value.
+struct ValueFetcher(&'static str);
+
+#[async_trait]
+impl VaultSecretFetcher for ValueFetcher {
+    async fn list_secrets(
+        &self,
+        _connection: &SecretManagerConnection,
+        _client_secret: &str,
+        _vault_name: &str,
+    ) -> DomainResult<Vec<ExternalSecretRef>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_secret_value(
+        &self,
+        _connection: &SecretManagerConnection,
+        _client_secret: &str,
+        _vault_name: &str,
+        _secret_id: &str,
+    ) -> DomainResult<Option<String>> {
+        Ok(Some(self.0.to_string()))
+    }
+
+    async fn test_connection(
+        &self,
+        _connection: &SecretManagerConnection,
+        _client_secret: &str,
+        _vault_name: &str,
+    ) -> DomainResult<()> {
+        Ok(())
+    }
+}
+
+/// A service over `collection` whose environment `dev` binds `vault.key` to `value`.
+///
+/// `env_vars` are added to the environment `dev`.
+fn value_vault_service(
+    collection: Collection,
+    value: &'static str,
+    env_vars: Vec<Variable>,
+) -> (RequestExecutionService, Arc<KeepingExecutor>) {
+    let executor = Arc::new(KeepingExecutor::default());
+    let mut env = Environment::new("dev");
+    env.variables.extend(env_vars);
+    env.external_secrets.push(ExternalSecretBinding {
+        alias: "vault".to_string(),
+        connection_id: "conn-1".to_string(),
+        vault_name: "dev-vault".to_string(),
+        secret_names: vec![ExternalSecretRef {
+            name: "key".to_string(),
+            secret_id: "sec-1".to_string(),
+        }],
+    });
+    let connection = SecretManagerConnection {
+        id: "conn-1".to_string(),
+        label: "Test".to_string(),
+        base_url: "https://vault.internal:8774".to_string(),
+        client_id: "rocketapi".to_string(),
+        verify_ssl: true,
+        allow_insecure_http: false,
+        provider: Default::default(),
+        config: None,
+    };
+    let svc = RequestExecutionService::new(
+        Box::new(StaticEnvRepo(env)),
+        Arc::new(SharedKeeping(Arc::clone(&executor))),
+        Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
+            collection,
+        ))),
+        Box::new(NullCookieRepo),
+        Box::new(NullEventPublisher),
+        Box::new(FakeSecretManagerRepo(connection)),
+        Arc::new(FakeSecretStore("client-secret".into())),
+        Arc::new(ValueFetcher(value)),
+    )
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    (svc, executor)
+}
+
+#[tokio::test]
+async fn a_vault_value_in_a_header_is_masked_in_the_sent_request() {
+    const VALUE: &str = "vault-value-123456";
+    let collection = main_and_login_with("", "", "", &[("X-Key", "{{vault.key}}")], &[]);
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = value_vault_service(collection, VALUE, Vec::new());
+    let out = svc.execute(input).await.expect("execute");
+    assert_eq!(sent_header(&executor, 0, "X-Key").as_deref(), Some(VALUE));
+    let sent = out.sent_request.expect("a sent request");
+    let header = sent.headers.iter().find(|h| h.key == "X-Key");
+    assert_eq!(header.map(|h| h.value.as_str()), Some("••••••"));
+    let json = serde_json::to_string(&sent).expect("serialize");
+    assert!(!json.contains(VALUE), "{json}");
 }
 
 const CATCH_RUN: &str = "try { await rok.runRequest('auth/login'); console.log('ran'); } \
@@ -1486,4 +1830,903 @@ async fn a_script_warn_with_the_warning_text_does_not_hide_the_backend_line() {
     assert!(out.script_error.is_none(), "{:?}", out.script_error);
     // The script's own line and the backend's line.
     assert_eq!(withheld_lines(&out), 2, "{:?}", console(&out));
+}
+
+// ---- Scopes are reloaded after a nested run ----
+
+#[tokio::test]
+async fn run_request_e2e_a_nested_env_write_fills_the_outer_header() {
+    let collection = main_and_login_with(
+        "await rok.runRequest('auth/login');",
+        "rok.setEnvVar('E', 'tok-1');",
+        "",
+        &[("Authorization", "Bearer {{E}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(
+        urls(&executor),
+        vec![
+            "https://api.test/login.yml".to_string(),
+            "https://api.test/main.yml".to_string()
+        ]
+    );
+    assert_eq!(
+        sent_header(&executor, 1, "Authorization").as_deref(),
+        Some("Bearer tok-1")
+    );
+    // The Console copy carries the second-pass value the outer send used.
+    let sent = out.sent_request.expect("a sent request");
+    let auth = sent
+        .headers
+        .iter()
+        .find(|h| h.key.eq_ignore_ascii_case("Authorization"))
+        .map(|h| h.value.clone());
+    assert_eq!(auth, sent_header(&executor, 1, "Authorization"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_name_the_nested_run_created_fills_the_outer_header() {
+    let collection = main_and_login_with(
+        "await rok.runRequest('auth/login');",
+        "rok.setEnvVar('T', 'tok-2');",
+        "",
+        &[("X-T", "{{T}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 1, "X-T").as_deref(), Some("tok-2"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_secret_the_nested_run_wrote_is_masked() {
+    let mut collection = main_and_login_with(
+        "await rok.runRequest('auth/login');",
+        "rok.setEnvVar('S', 'new-secret-value-2');",
+        "",
+        &[("X-S", "{{S}}")],
+        &[],
+    );
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.post_response_script = Some("console.log('S=' + req.getHeader('X-S'));".into());
+    }
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::secret("S", "old-secret-value-1")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 1, "X-S").as_deref(),
+        Some("new-secret-value-2")
+    );
+    let lines = console(&out);
+    assert!(lines.iter().any(|l| l.starts_with("S=")), "{lines:?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("new-secret-value-2")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_request_e2e_the_next_script_in_the_chain_reads_the_reloaded_value() {
+    // The folder chain is served for every request, the nested one too, so the folder script
+    // only calls `runRequest` once: the nested run is seeded with the caller's runtime `done`.
+    let collection = main_and_login(
+        "console.log('E=' + rok.getEnvVar('E'));",
+        "rok.setEnvVar('E', 'tok-3');",
+        "",
+    );
+    let folder = rocket_collection::FolderSettings {
+        pre_request_script: Some(
+            "if (rok.getVar('done') !== 'y') { rok.setVar('done', 'y'); \
+             await rok.runRequest('auth/login'); }"
+                .into(),
+        ),
+        ..Default::default()
+    };
+    let input = send_input(&collection, "main.yml");
+    let repo = InMemoryCollectionRepo::with_folder_chain(collection, vec![folder], None);
+    let (svc, _executor) = run_service_over(repo, dev_env(vec![Variable::new("E", "old")]));
+    let out = svc.execute(input).await.expect("execute");
+    assert!(
+        console(&out).contains(&"E=tok-3".to_string()),
+        "{:?}",
+        console(&out)
+    );
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_failed_reload_keeps_the_scopes_and_warns() {
+    // The nested login saves a new token, then makes every later env read fail.
+    let collection = main_and_login_with(
+        "await rok.runRequest('auth/login');",
+        "rok.setEnvVar('token', 'new'); rok.setEnvVar('break_reads', '1');",
+        "",
+        &[("Authorization", "Bearer {{token}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("token", "old")]);
+    let (svc, executor) = run_service_breaking(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // The reload failed, so the begin-time value stays; no name is sent as `{{token}}`.
+    assert_eq!(
+        sent_header(&executor, 1, "Authorization").as_deref(),
+        Some("Bearer old")
+    );
+    let warn = out
+        .console_entries
+        .iter()
+        .find(|e| {
+            e.level == rocket_scripting::ConsoleLevel::Warn
+                && e.message.starts_with("Could not reload")
+        })
+        .expect("a reload warning");
+    assert!(warn.message.contains("disk gone"), "{}", warn.message);
+}
+
+// ── nested values ────────────────────────────────────────────────────────────
+
+/// Environment `dev` with `baseUrl = https://{{host}}` and `host = api.test`.
+fn nested_env() -> Arc<Mutex<Environment>> {
+    dev_env(vec![
+        Variable::new("baseUrl", "https://{{host}}"),
+        Variable::new("host", "api.test"),
+    ])
+}
+
+/// A collection whose `main.yml` has the URL `{{baseUrl}}/x` and the given pre-request script.
+fn nested_collection(pre_request: &str, headers: &[(&str, &str)]) -> Collection {
+    let mut collection = main_and_login_with(pre_request, "", "", headers, &[]);
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.url = "{{baseUrl}}/x".to_string();
+    }
+    collection
+}
+
+#[tokio::test]
+async fn nested_e2e_an_env_value_fills_a_nested_name() {
+    let collection = nested_collection("", &[("X-B", "{{baseUrl}}")]);
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), nested_env());
+    svc.execute(input).await.expect("execute");
+    assert_eq!(urls(&executor), vec!["https://api.test/x".to_string()]);
+    assert_eq!(
+        sent_header(&executor, 0, "X-B").as_deref(),
+        Some("https://api.test")
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_a_script_change_reaches_the_nested_name() {
+    let collection = nested_collection("rok.setEnvVar('host', 'new.test');", &[]);
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), nested_env());
+    svc.execute(input).await.expect("execute");
+    assert_eq!(urls(&executor), vec!["https://new.test/x".to_string()]);
+}
+
+#[tokio::test]
+async fn nested_e2e_a_runtime_value_is_not_expanded() {
+    let collection = nested_collection("rok.setVar('r', 'https://{{host}}');", &[("X-R", "{{r}}")]);
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), nested_env());
+    svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-R").as_deref(),
+        Some("https://{{host}}")
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_a_vault_name_inside_an_env_value_is_sent_as_written() {
+    let collection = main_and_login_with("", "", "", &[("X-V", "{{x}}")], &[]);
+    let input = send_input(&collection, "main.yml");
+    let executor = Arc::new(KeepingExecutor::default());
+    let mut env = Environment::new("dev");
+    env.set_variable(Variable::new("x", "Bearer {{rv.secret}}"));
+    env.external_secrets.push(ExternalSecretBinding {
+        alias: "rv".to_string(),
+        connection_id: "conn-1".to_string(),
+        vault_name: "dev-vault".to_string(),
+        secret_names: vec![ExternalSecretRef {
+            name: "secret".to_string(),
+            secret_id: "sec-1".to_string(),
+        }],
+    });
+    let connection = SecretManagerConnection {
+        id: "conn-1".to_string(),
+        label: "Test".to_string(),
+        base_url: "https://vault.internal:8774".to_string(),
+        client_id: "rocketapi".to_string(),
+        verify_ssl: true,
+        allow_insecure_http: false,
+        provider: Default::default(),
+        config: None,
+    };
+    let svc = RequestExecutionService::new(
+        Box::new(StaticEnvRepo(env)),
+        Arc::new(SharedKeeping(Arc::clone(&executor))),
+        Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
+            collection,
+        ))),
+        Box::new(NullCookieRepo),
+        Box::new(NullEventPublisher),
+        Box::new(FakeSecretManagerRepo(connection)),
+        Arc::new(FakeSecretStore("client-secret".into())),
+        Arc::new(ValueFetcher("vault-value-123456")),
+    )
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-V").as_deref(),
+        Some("Bearer {{rv.secret}}")
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_with_no_script_writes_sends_the_first_pass() {
+    let collection = main_and_login_with("console.log('hi');", "", "", &[("X-A", "{{a}}")], &[]);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![
+        Variable::new("a", "{{$guid}}-{{host}}"),
+        Variable::new("host", "h"),
+    ]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    svc.execute(input.clone()).await.expect("execute");
+    let sent = sent_header(&executor, 0, "X-A").expect("header");
+    let guid = sent.strip_suffix("-h").expect("ends with -h");
+    assert_eq!(guid.len(), 36, "{sent}");
+    assert!(
+        guid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+        "{sent}"
+    );
+
+    // No name looks changed when the scripts wrote nothing.
+    let state = svc
+        .begin_phases(&input, &std::collections::HashMap::new())
+        .expect("begin");
+    let now = super::second_pass_values(&state);
+    let overrides = super::runtime_fill::Overrides::between(
+        &state.templates.first_values,
+        &now,
+        &state.var_ctx.runtime,
+    );
+    assert!(overrides.values.is_empty(), "{:?}", overrides.values);
+    assert!(overrides.removed.is_empty());
+}
+
+#[tokio::test]
+async fn nested_e2e_an_expanded_secret_value_is_masked() {
+    let mut collection = main_and_login_with("", "", "", &[("Authorization", "{{token}}")], &[]);
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.post_response_script =
+            Some("console.log('A=' + req.getHeader('Authorization'));".into());
+        main.url = "https://api.test/main.yml?t={{token}}".into();
+    }
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![
+        Variable::secret("token", "Bearer {{raw}}"),
+        Variable::new("raw", "raw-value-123456"),
+    ]);
+    let history = InMemoryHistoryRepo::new();
+    let executor = Arc::new(KeepingExecutor::default());
+    let svc = RequestExecutionService::new(
+        Box::new(MemoryEnvRepo(env)),
+        Arc::new(SharedKeeping(Arc::clone(&executor))),
+        Box::new(SharedHistoryRepo(Arc::clone(&history))),
+        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
+            collection,
+        ))),
+        Box::new(NullCookieRepo),
+        Box::new(NullEventPublisher),
+        Box::new(EmptySecretManagerRepo),
+        Arc::new(rocket_environment::NullSecretStore),
+        Arc::new(rocket_environment::NullVaultSecretFetcher),
+    )
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    let out = svc.execute(input).await.expect("execute");
+    {
+        let entries = history.entries.lock().expect("lock");
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|e| !format!("{e:?}").contains("Bearer raw-value-123456")),
+            "{entries:?}"
+        );
+        // History has no headers, so the URL query is what proves the redaction.
+        assert!(
+            entries
+                .iter()
+                .all(|e| !e.url.contains("raw-value-123456") && e.url.contains("••••••")),
+            "{entries:?}"
+        );
+    }
+    assert_eq!(
+        sent_header(&executor, 0, "Authorization").as_deref(),
+        Some("Bearer raw-value-123456")
+    );
+    assert!(out.run_secret_values.contains("Bearer raw-value-123456"));
+    let lines = console(&out);
+    assert!(lines.iter().any(|l| l.starts_with("A=")), "{lines:?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("Bearer raw-value-123456")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_a_script_written_value_is_sent_as_written() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('x', 'https://{{host}}');",
+        "",
+        "",
+        &[("X-X", "{{x}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![
+        Variable::new("host", "api.test"),
+        Variable::new("x", "old"),
+    ]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-X").as_deref(),
+        Some("https://{{host}}")
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_a_script_written_inner_value_is_not_expanded() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('b', '{{apiKey}}');",
+        "",
+        "",
+        &[("X-A", "{{a}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![
+        Variable::new("a", "{{b}}"),
+        Variable::new("b", "plain"),
+        Variable::secret("apiKey", "key-123456789"),
+    ]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-A").as_deref(),
+        Some("{{apiKey}}")
+    );
+}
+
+#[tokio::test]
+async fn sent_request_e2e_lists_a_secret_the_script_wrote() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('token', 'new-token-654321');",
+        "",
+        "",
+        &[("X-T", "{{token}}"), ("X-V", "{{vault.key}}")],
+        &[],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, _executor) = value_vault_service(
+        collection,
+        "vault-value-123456",
+        vec![Variable::secret("token", "old-token-123456")],
+    );
+    let out = svc.execute(input).await.expect("execute");
+    let sent = out.sent_request.expect("sent request");
+    assert!(
+        sent.secret_values.contains(&"new-token-654321".to_string()),
+        "{:?}",
+        sent.secret_values
+    );
+    assert!(
+        !sent
+            .secret_values
+            .contains(&"vault-value-123456".to_string()),
+        "{:?}",
+        sent.secret_values
+    );
+}
+
+#[tokio::test]
+async fn nested_e2e_the_cut_text_of_a_partly_filled_secret_is_masked() {
+    let mut collection = main_and_login_with("", "", "", &[("X-N", "{{next}}")], &[]);
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.post_response_script = Some("console.log('N=' + req.getHeader('X-N'));".into());
+    }
+    let input = send_input(&collection, "main.yml");
+    // Inside `next` the innermost name of `s` is past the depth cap, so it stays as written.
+    let env = dev_env(vec![
+        Variable::secret("s", "lit-part-123{{a}}"),
+        Variable::new("a", "{{b}}"),
+        Variable::new("b", "{{c}}"),
+        Variable::new("c", "x"),
+        Variable::new("next", "{{s}}"),
+    ]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert_eq!(
+        sent_header(&executor, 0, "X-N").as_deref(),
+        Some("lit-part-123{{c}}")
+    );
+    assert!(out.run_secret_values.contains("lit-part-123{{c}}"));
+    let lines = console(&out);
+    assert!(lines.iter().any(|l| l.starts_with("N=")), "{lines:?}");
+    assert!(
+        lines.iter().all(|l| !l.contains("lit-part-123")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn common_text_in_a_secret_is_not_masked_everywhere() {
+    let mut collection = main_and_login_with("", "", "", &[], &[]);
+    if let Some(CollectionItem::Request(main)) = collection.root.items.first_mut() {
+        main.url = "https://other.test/x".into();
+    }
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![
+        Variable::secret("token", "https://{{host}}/cb"),
+        Variable::new("host", "api.test"),
+    ]);
+    let history = InMemoryHistoryRepo::new();
+    let executor = Arc::new(KeepingExecutor::default());
+    let svc = RequestExecutionService::new(
+        Box::new(MemoryEnvRepo(env)),
+        Arc::new(SharedKeeping(Arc::clone(&executor))),
+        Box::new(SharedHistoryRepo(Arc::clone(&history))),
+        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
+            collection,
+        ))),
+        Box::new(NullCookieRepo),
+        Box::new(NullEventPublisher),
+        Box::new(EmptySecretManagerRepo),
+        Arc::new(rocket_environment::NullSecretStore),
+        Arc::new(rocket_environment::NullVaultSecretFetcher),
+    )
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    svc.execute(input).await.expect("execute");
+    let entries = history.entries.lock().expect("lock");
+    assert!(!entries.is_empty());
+    assert!(
+        entries.iter().all(|e| e.url.contains("https://other.test")),
+        "{entries:?}"
+    );
+}
+
+// ---- Nested runs see the caller's pending writes ----
+
+#[tokio::test]
+async fn run_request_e2e_the_nested_run_sees_the_callers_unsaved_env_write() {
+    let collection = main_and_login_with(
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('auth/login');",
+        "",
+        "",
+        &[],
+        &[("X-U", "{{U}}")],
+    );
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("E", "old")]);
+    let (svc, executor) =
+        run_service_over(InMemoryCollectionRepo::new(collection), Arc::clone(&env));
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 0, "X-U").as_deref(), Some("alice"));
+    // The caller still saves its own write when its script ends.
+    assert_eq!(env.lock().expect("lock").get_value("U"), Some("alice"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_pending_delete_hides_the_stored_value() {
+    let collection = main_and_login_with(
+        "rok.deleteEnvVar('E'); await rok.runRequest('auth/login');",
+        "",
+        "",
+        &[],
+        &[("X-E", "{{E}}")],
+    );
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = run_service(collection);
+    svc.execute(input).await.expect("execute");
+    assert_eq!(sent_header(&executor, 0, "X-E").as_deref(), Some("{{E}}"));
+}
+
+#[tokio::test]
+async fn a_pending_value_holding_a_vault_secret_stays_in_runtime() {
+    let collection = main_and_login("", "", "");
+    let input = send_input(&collection, "main.yml");
+    let (svc, _executor) = run_service(collection);
+    let secret = "vault-secret-value-1234";
+    let mut state = svc
+        .begin_phases(
+            &input,
+            &std::collections::HashMap::from([("v.k".to_string(), secret.to_string())]),
+        )
+        .expect("begin");
+    let pending = rocket_scripting::PendingWrites {
+        env: vec![("T".to_string(), Some(format!("Bearer {secret}")))],
+        ..Default::default()
+    };
+    super::overlay_pending_writes(&input, &mut state, &pending);
+    assert!(!state.var_ctx.env.contains_key("T"));
+    assert_eq!(
+        state.var_ctx.runtime.get("T").map(String::as_str),
+        Some(format!("Bearer {secret}").as_str())
+    );
+    assert!(state.console.iter().any(|e| e
+        .message
+        .contains("was not saved because it contains a vault secret")));
+}
+
+#[tokio::test]
+async fn pending_writes_skip_a_scope_with_nothing_selected() {
+    let collection = main_and_login("", "", "");
+    let mut input = send_input(&collection, "main.yml");
+    input.environment_name = None;
+    let (svc, _executor) = run_service(collection);
+    let mut state = svc
+        .begin_phases(&input, &std::collections::HashMap::new())
+        .expect("begin");
+    let pending = rocket_scripting::PendingWrites {
+        env: vec![("U".to_string(), Some("alice".to_string()))],
+        global_env: vec![("G".to_string(), Some("g".to_string()))],
+        collection: vec![("C".to_string(), Some("c".to_string()))],
+    };
+    super::overlay_pending_writes(&input, &mut state, &pending);
+    assert!(!state.var_ctx.env.contains_key("U"));
+    assert!(
+        !state.var_ctx.global_env.contains_key("G"),
+        "no global env selected"
+    );
+    assert_eq!(
+        state.var_ctx.collection.get("C").map(String::as_str),
+        Some("c")
+    );
+}
+
+#[tokio::test]
+async fn run_request_e2e_the_pending_writes_survive_the_nested_runs_own_reload() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    let mut mid = saved("Mid", "mid.yml", "await rok.runRequest('leaf.yml');");
+    mid.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(mid);
+    collection.root.add_request(saved("Leaf", "leaf.yml", ""));
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf (0), mid (1), main (2).
+    assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("alice"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_write_inside_the_nested_run_beats_the_callers_pending_write() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    let mut mid = saved(
+        "Mid",
+        "mid.yml",
+        "rok.setEnvVar('U', 'bob'); await rok.runRequest('leaf.yml');",
+    );
+    mid.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(mid);
+    collection.root.add_request(saved("Leaf", "leaf.yml", ""));
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf (0), mid (1), main (2).
+    assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_grandchild_run_sees_the_first_callers_pending_write() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    collection
+        .root
+        .add_request(saved("Mid", "mid.yml", "await rok.runRequest('leaf.yml');"));
+    let mut leaf = saved("Leaf", "leaf.yml", "");
+    leaf.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    assert_eq!(sent_header(&executor, 0, "X-U").as_deref(), Some("alice"));
+}
+
+#[tokio::test]
+async fn a_reapplied_vault_pending_value_adds_no_second_warning() {
+    let collection = main_and_login("", "", "");
+    let input = send_input(&collection, "main.yml");
+    let (svc, _executor) = run_service(collection);
+    let secret = "vault-secret-value-1234";
+    let mut state = svc
+        .begin_phases(
+            &input,
+            &std::collections::HashMap::from([("v.k".to_string(), secret.to_string())]),
+        )
+        .expect("begin");
+    let pending = rocket_scripting::PendingWrites {
+        env: vec![("T".to_string(), Some(format!("Bearer {secret}")))],
+        ..Default::default()
+    };
+    state.pending = pending.clone();
+    super::overlay_pending_writes(&input, &mut state, &pending);
+    svc.reload_stored_scopes(&input, &mut state);
+    assert!(
+        !state
+            .console
+            .iter()
+            .any(|e| e.message.contains("Could not reload")),
+        "the reload must succeed"
+    );
+    let warnings = state
+        .console
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("was not saved because it contains a vault secret")
+        })
+        .count();
+    assert_eq!(warnings, 1);
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_sibling_nested_run_does_not_get_an_inherited_write_that_was_replaced() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    collection.root.add_request(saved(
+        "Mid",
+        "mid.yml",
+        "await rok.runRequest('leaf1.yml'); await rok.runRequest('leaf2.yml');",
+    ));
+    let mut leaf1 = saved("Leaf1", "leaf1.yml", "");
+    leaf1.post_response_script = Some("rok.setEnvVar('U', 'carol');".to_string());
+    collection.root.add_request(leaf1);
+    let mut leaf2 = saved("Leaf2", "leaf2.yml", "");
+    leaf2.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf2);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf1 (0), leaf2 (1), mid (2), main (3).
+    assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("carol"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_nested_script_still_reads_the_inherited_value_after_a_run() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    let mut mid = saved(
+        "Mid",
+        "mid.yml",
+        "await rok.runRequest('leaf.yml'); rok.setVar('seen', rok.getEnvVar('U'));",
+    );
+    mid.headers = vec![Header::new("X-S", "{{seen}}")];
+    collection.root.add_request(mid);
+    collection.root.add_request(saved("Leaf", "leaf.yml", ""));
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf (0), mid (1), main (2).
+    assert_eq!(sent_header(&executor, 1, "X-S").as_deref(), Some("alice"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_an_inherited_vault_value_never_enters_the_nested_scripts_env_reads() {
+    const VALUE: &str = "vault-value-123456";
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        &format!("rok.setEnvVar('T', 'Bearer {VALUE}'); await rok.runRequest('mid.yml');"),
+    ));
+    let mut mid = saved(
+        "Mid",
+        "mid.yml",
+        "await rok.runRequest('leaf.yml'); rok.setVar('seen', String(rok.getEnvVar('T')));",
+    );
+    mid.headers = vec![Header::new("X-S", "{{seen}}")];
+    collection.root.add_request(mid);
+    collection.root.add_request(saved("Leaf", "leaf.yml", ""));
+    let input = send_input(&collection, "main.yml");
+    let (svc, executor) = value_vault_service(collection, VALUE, Vec::new());
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf (0), mid (1), main (2).
+    let seen = sent_header(&executor, 1, "X-S").unwrap_or_default();
+    assert!(!seen.contains(VALUE), "{seen}");
+}
+
+// ---- Final review fixes: pruning, failed nested runs, secret names ----
+
+#[tokio::test]
+async fn run_request_e2e_a_folder_script_write_beats_the_inherited_pending_write() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    collection
+        .root
+        .add_request(saved("Mid", "mid.yml", "await rok.runRequest('leaf.yml');"));
+    let mut leaf = saved("Leaf", "leaf.yml", "");
+    leaf.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf);
+    let folder = rocket_collection::FolderSettings {
+        pre_request_script: Some(
+            "if (req.getUrl().endsWith('mid.yml')) { rok.setEnvVar('U', 'bob'); }".into(),
+        ),
+        ..Default::default()
+    };
+    let input = send_input(&collection, "main.yml");
+    let repo = InMemoryCollectionRepo::with_folder_chain(collection, vec![folder], None);
+    let (svc, executor) = run_service_over(repo, dev_env(vec![Variable::new("U", "stored")]));
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: leaf (0), mid (1), main (2).
+    assert_eq!(sent_header(&executor, 0, "X-U").as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_pre_request_write_beats_the_inherited_write_in_the_post_response_run() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    let mut mid = saved("Mid", "mid.yml", "rok.setEnvVar('U', 'bob');");
+    mid.post_response_script = Some("await rok.runRequest('leaf.yml');".to_string());
+    collection.root.add_request(mid);
+    let mut leaf = saved("Leaf", "leaf.yml", "");
+    leaf.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: mid (0), leaf (1), main (2).
+    assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("bob"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_failed_nested_run_still_drops_the_replaced_inherited_write() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    collection.root.add_request(saved(
+        "Mid",
+        "mid.yml",
+        "try { await rok.runRequest('failing.yml'); } catch (e) {} \
+         await rok.runRequest('leaf2.yml');",
+    ));
+    collection.root.add_request(saved(
+        "Failing",
+        "failing.yml",
+        "rok.setEnvVar('U', 'carol');",
+    ));
+    let mut leaf2 = saved("Leaf2", "leaf2.yml", "");
+    leaf2.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf2);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    let leaf2_header = executor
+        .seen()
+        .iter()
+        .find(|r| r.url.ends_with("leaf2.yml"))
+        .and_then(|r| {
+            r.headers
+                .iter()
+                .find(|h| h.key == "X-U")
+                .map(|h| h.value.clone())
+        });
+    assert_eq!(leaf2_header.as_deref(), Some("carol"));
+}
+
+#[tokio::test]
+async fn a_pending_value_under_a_secret_name_joins_the_redaction_list() {
+    let collection = main_and_login("", "", "");
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::secret("token", "stored-secret-value")]);
+    let (svc, _executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let mut state = svc
+        .begin_phases(&input, &std::collections::HashMap::new())
+        .expect("begin");
+    let value = "pending-secret-123456";
+    let pending = rocket_scripting::PendingWrites {
+        env: vec![
+            ("token".to_string(), Some(value.to_string())),
+            ("plain".to_string(), Some("not-a-secret-value".to_string())),
+        ],
+        ..Default::default()
+    };
+    super::overlay_pending_writes(&input, &mut state, &pending);
+    assert!(state.var_ctx.secret_values.contains(value));
+    assert!(!state.var_ctx.secret_values.contains("not-a-secret-value"));
+}
+
+#[tokio::test]
+async fn run_request_e2e_a_before_request_env_action_beats_the_inherited_write() {
+    let mut collection = Collection::new("api");
+    collection.root.add_request(saved(
+        "Main",
+        "main.yml",
+        "rok.setEnvVar('U', 'alice'); await rok.runRequest('mid.yml');",
+    ));
+    let mut mid = saved("Mid", "mid.yml", "");
+    mid.actions = vec![rocket_shared::ActionSetVariable {
+        phase: "before-request".into(),
+        selector: rocket_shared::ActionSelector {
+            expression: "'bob'".into(),
+            method: "jsonq".into(),
+        },
+        variable: rocket_shared::ActionVariable {
+            name: "U".into(),
+            scope: "environment".into(),
+        },
+        disabled: None,
+        description: None,
+    }];
+    mid.post_response_script = Some("await rok.runRequest('leaf.yml');".to_string());
+    collection.root.add_request(mid);
+    let mut leaf = saved("Leaf", "leaf.yml", "");
+    leaf.headers = vec![Header::new("X-U", "{{U}}")];
+    collection.root.add_request(leaf);
+    let input = send_input(&collection, "main.yml");
+    let env = dev_env(vec![Variable::new("U", "stored")]);
+    let (svc, executor) = run_service_over(InMemoryCollectionRepo::new(collection), env);
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    // Executor order: mid (0), leaf (1), main (2).
+    assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("bob"));
 }

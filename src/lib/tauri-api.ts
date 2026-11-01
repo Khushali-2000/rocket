@@ -565,10 +565,23 @@ export interface ConsoleEntry {
   message: string;
 }
 
+/** The request the backend sent, after the scripts ran. RocketVault values arrive masked. */
+export interface SentRequest {
+  url: string;
+  headers: Header[];
+  queryParams: QueryParam[];
+  body?: Body | null;
+  auth: Auth;
+  /** Non-vault secret values in the request, so the Console masks a secret a script wrote. */
+  secretValues?: string[];
+}
+
 export interface ExecuteRequestResponse extends HttpResponse {
   testResults: TestResult[];
   consoleEntries: ConsoleEntry[];
   scriptError: string | null;
+  /** Absent when the backend has no sent copy. */
+  sentRequest?: SentRequest;
 }
 
 export interface QueryParam {

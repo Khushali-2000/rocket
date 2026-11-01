@@ -46,6 +46,15 @@ pub enum HostError {
     Failed(String),
 }
 
+/// Environment, global and collection writes the calling script made and has not saved yet,
+/// in the order it made them. `None` deletes the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingWrites {
+    pub env: Vec<(String, Option<String>)>,
+    pub global_env: Vec<(String, Option<String>)>,
+    pub collection: Vec<(String, Option<String>)>,
+}
+
 /// A `rok.runRequest` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostRunRequest {
@@ -53,6 +62,9 @@ pub struct HostRunRequest {
     pub path: String,
     /// The calling script's runtime variables, its own writes so far included.
     pub runtime_vars: HashMap<String, String>,
+    /// The calling script's unsaved environment, global and collection writes. The nested run
+    /// sees them in memory only; the caller still saves them when its script ends.
+    pub pending: PendingWrites,
 }
 
 /// Variable scopes as stored after a nested run.

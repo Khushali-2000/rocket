@@ -126,6 +126,8 @@ fn cached_node(
             // A partial run never needs the deferred History entry.
             if let CapturedOutput::Request(out) = &mut o {
                 out.deferred_history = None;
+                // Flow never reads the sent copy, so it is not kept in memory.
+                out.sent_request = None;
             }
             o
         })
@@ -965,6 +967,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            sent_request: None,
         }
     }
 
@@ -1018,6 +1021,43 @@ mod tests {
         );
         match run.nodes["r"].output.as_deref() {
             Some(CapturedOutput::Request(out)) => assert!(out.deferred_history.is_none()),
+            _ => panic!("the request output should be cached"),
+        }
+    }
+
+    #[test]
+    fn a_cached_request_output_has_no_sent_request() {
+        let flow = Flow {
+            name: "f".to_string(),
+            nodes: vec![request("r")],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        let order = vec!["r".to_string()];
+        let mut run_results = results(&[]);
+        run_results.outcomes.insert(
+            "r".to_string(),
+            NodeOutcome::Succeeded {
+                chosen_exit: handle::RESULT.to_string(),
+            },
+        );
+        let mut out = request_output("body", false);
+        out.sent_request = Some(crate::execution_service::sent_request::sent_request_masked(
+            &rocket_http::HttpRequest::new(rocket_shared::types::HttpMethod::Get, "https://a.test"),
+            &HashSet::new(),
+            &HashSet::new(),
+        ));
+        run_results
+            .captured
+            .insert("r".to_string(), CapturedOutput::Request(Box::new(out)));
+        let run = CachedRun::from_full_run(
+            &scope(),
+            &flow,
+            run_results,
+            &fingerprints(&flow, &order, &|_| None),
+        );
+        match run.nodes["r"].output.as_deref() {
+            Some(CapturedOutput::Request(out)) => assert!(out.sent_request.is_none()),
             _ => panic!("the request output should be cached"),
         }
     }

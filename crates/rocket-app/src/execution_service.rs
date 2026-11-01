@@ -30,9 +30,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub(crate) mod runtime_fill;
+pub(crate) mod sent_request;
+pub use sent_request::SentRequest;
 pub mod websocket_resolution;
 use self::runtime_fill::{
-    allow_new_names, fill_names, fill_pairs, swap_path_values, FieldTemplate, RequestTemplates,
+    allow_new_names, fill_names, fill_pairs, swap_path_values, FieldTemplate, Overrides,
+    RequestTemplates,
 };
 use crate::process_env::{scope_target, ProcessEnv, ProcessEnvScopeInput};
 use std::cell::RefCell;
@@ -53,6 +56,7 @@ mod send_pins;
 use self::script_chain::{
     folder_labels, folder_mentions, script_mentions, ChainedScript, PhaseScripts,
 };
+use self::sent_request::sent_request_masked;
 
 /// Request path prefix of an inline Flow request. It names no file, so it has no folder chain.
 pub(crate) const FLOW_INLINE_PATH_PREFIX: &str = "__flow_inline__/";
@@ -223,6 +227,9 @@ pub struct ExecuteRequestOutput {
     /// True when the run, or a nested `rok.runRequest` run, sent a `{{process.env.NAME}}`
     /// the trust gate withheld. Never serialized to IPC. A caller adds the Console line.
     pub process_env_withheld: bool,
+    /// The request as sent, after every pre-request phase, with RocketVault values masked.
+    /// `None` when no request was sent.
+    pub sent_request: Option<SentRequest>,
 }
 
 // Written by hand so the secret values are never printed, only counted.
@@ -238,6 +245,7 @@ impl std::fmt::Debug for ExecuteRequestOutput {
             .field("run_sent_credentials", &self.run_sent_credentials.len())
             .field("run_process_env_values", &self.run_process_env_values.len())
             .field("process_env_withheld", &self.process_env_withheld)
+            .field("sent_request", &self.sent_request.is_some())
             .finish()
     }
 }
@@ -377,6 +385,85 @@ struct ResolvedParts {
     request: HttpRequest,
     templates: RequestTemplates,
     process_env: SendProcessEnv,
+    /// The `$dynamic` values made while nested names were filled, keyed with the `$`.
+    nested_dynamic: std::collections::HashMap<String, String>,
+    /// The variables of the first pass with nested names filled, without the host environment.
+    first_values: std::collections::HashMap<String, String>,
+    /// The redaction forms of the secret values the first pass filled (see `ExpandedSend`).
+    secret_forms: Vec<String>,
+}
+
+/// The send map of stored scopes plus Flow variables, with the redaction forms of its secrets.
+pub(crate) struct ExpandedSend {
+    /// `ctx.flatten()` with `flow_vars` on top and the stored values' nested names filled.
+    pub values: std::collections::HashMap<String, String>,
+    /// Forms to mask: the filled value of every secret name that differs from its raw value, and
+    /// the text put in for a secret inside another value when a fill was cut and part of the
+    /// secret stayed as written.
+    pub secret_forms: Vec<String>,
+}
+
+/// Builds the map a send fills placeholders from. Both the first pass and the Flow checks use
+/// it, so they never disagree on a nested value.
+pub(crate) fn expanded_send(
+    ctx: &VariableContext,
+    flow_vars: &std::collections::HashMap<String, String>,
+    dynamic: &mut std::collections::HashMap<String, String>,
+) -> ExpandedSend {
+    let mut fills = std::collections::HashSet::new();
+    let values = rocket_environment::expand_nested_recording(ctx, flow_vars, dynamic, &mut fills);
+    let mut raw = ctx.flatten();
+    raw.extend(flow_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let mut secret_forms = Vec::new();
+    for key in &ctx.secret_keys {
+        let Some(raw_value) = raw.get(key) else {
+            continue;
+        };
+        if let Some(filled) = values.get(key).filter(|filled| *filled != raw_value) {
+            secret_forms.extend(crate::redaction::redaction_forms(filled));
+        }
+    }
+    for fill in &fills {
+        secret_forms.extend(crate::redaction::redaction_forms(fill));
+    }
+    ExpandedSend {
+        values,
+        secret_forms,
+    }
+}
+
+/// The variables of the second pass: the first pass values when no stored value changed, else
+/// the scopes expanded again.
+///
+/// A name whose raw value a script changed or added is passed as `extra`, so it is put in as it
+/// is and is not expanded when another name reaches it. A nested run treats values its caller
+/// saved earlier in the same send as stored values.
+#[cfg(test)]
+pub(crate) fn second_pass_values(state: &PhaseState) -> std::collections::HashMap<String, String> {
+    second_pass_values_recording(state, &mut std::collections::HashSet::new())
+}
+
+/// Like `second_pass_values`, and also records the text put in for a secret name inside another
+/// value, so a secret cut short by a limit in this pass is masked too.
+pub(crate) fn second_pass_values_recording(
+    state: &PhaseState,
+    secret_fills: &mut std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, String> {
+    let now_raw = state.var_ctx.flatten();
+    if now_raw == state.templates.first_raw {
+        return state.templates.first_values.clone();
+    }
+    let changed: std::collections::HashMap<String, String> = now_raw
+        .iter()
+        .filter(|(name, raw)| state.templates.first_raw.get(*name) != Some(*raw))
+        .map(|(name, raw)| (name.clone(), raw.clone()))
+        .collect();
+    rocket_environment::expand_nested_recording(
+        &state.var_ctx,
+        &changed,
+        &mut state.templates.nested_dynamic.clone(),
+        secret_fills,
+    )
 }
 
 /// The Console line for a backend send whose `{{process.env.NAME}}` was left unresolved.
@@ -475,9 +562,17 @@ pub(crate) struct PhaseState {
     /// Set when a nested run withheld `process.env` values, so the caller's Console gets the
     /// warning too. Shared with the script host.
     pub nested_withheld: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when a script of this send started a `rok.runRequest`. The nested run saved its
+    /// writes, so the pre-request loop reads the scopes back from storage. Shared with the
+    /// script host.
+    pub nested_ran: Arc<std::sync::atomic::AtomicBool>,
     /// True for a `rok.runRequest` run. It reports a withheld value to its caller
     /// (`ExecuteRequestOutput::process_env_withheld`) instead of writing the Console line.
     pub nested: bool,
+    /// The caller's unsaved writes, kept so a reload of the stored scopes can apply them again.
+    pub pending: rocket_scripting::PendingWrites,
+    /// The stored value of each pending key when the writes were first applied.
+    pub pending_stored: PendingStored,
     /// Names a pre-request script added in text it wrote (URL, header, body). Script text is
     /// filled only for these and the names the first resolution could not resolve.
     pub script_names: std::collections::HashSet<String>,
@@ -946,23 +1041,29 @@ impl RequestExecutionService {
             }
         }
 
-        let effective_val = |cv: &rocket_collection::CollectionVariable| -> String {
-            if cv.value.is_empty() {
-                cv.initial_value.clone()
+        // Like the frontend `varsToMap`: a variable with no key or no value (and no initial
+        // value) is skipped, so it does not hide the same name in a lower scope.
+        let effective_val = |cv: &rocket_collection::CollectionVariable| -> Option<String> {
+            let val = if cv.value.is_empty() {
+                &cv.initial_value
             } else {
-                cv.value.clone()
-            }
+                &cv.value
+            };
+            (!cv.key.is_empty() && !val.is_empty()).then(|| val.clone())
         };
 
         if let Some(col) = collection {
             let settings = read_scope(strict, self.send_collection_repo().get_settings(col))?
                 .unwrap_or_default();
             for cv in settings.variables.iter().filter(|v| v.enabled) {
-                let val = effective_val(cv);
-                ctx.collection.insert(cv.key.clone(), val.clone());
-                if cv.secret {
+                // An empty secret variable still marks its name secret.
+                if cv.secret && !cv.key.is_empty() {
                     ctx.secret_keys.insert(cv.key.clone());
                 }
+                let Some(val) = effective_val(cv) else {
+                    continue;
+                };
+                ctx.collection.insert(cv.key.clone(), val.clone());
                 if cv.secret && val.len() >= MIN_REDACTION_LEN {
                     ctx.secret_values.insert(val);
                 }
@@ -1000,11 +1101,14 @@ impl RequestExecutionService {
             };
             if let Some(folder_vars) = read_scope(strict, folder_read)? {
                 for cv in folder_vars.iter().filter(|v| v.enabled) {
-                    let val = effective_val(cv);
-                    ctx.folder.insert(cv.key.clone(), val.clone());
-                    if cv.secret {
+                    // An empty secret variable still marks its name secret.
+                    if cv.secret && !cv.key.is_empty() {
                         ctx.secret_keys.insert(cv.key.clone());
                     }
+                    let Some(val) = effective_val(cv) else {
+                        continue;
+                    };
+                    ctx.folder.insert(cv.key.clone(), val.clone());
                     if cv.secret && val.len() >= MIN_REDACTION_LEN {
                         ctx.secret_values.insert(val);
                     }
@@ -1018,11 +1122,14 @@ impl RequestExecutionService {
                 self.send_collection_repo().get_request_variables(col, path),
             )? {
                 for cv in request_vars.iter().filter(|v| v.enabled) {
-                    let val = effective_val(cv);
-                    ctx.request.insert(cv.key.clone(), val.clone());
-                    if cv.secret {
+                    // An empty secret variable still marks its name secret.
+                    if cv.secret && !cv.key.is_empty() {
                         ctx.secret_keys.insert(cv.key.clone());
                     }
+                    let Some(val) = effective_val(cv) else {
+                        continue;
+                    };
+                    ctx.request.insert(cv.key.clone(), val.clone());
                     if cv.secret && val.len() >= MIN_REDACTION_LEN {
                         ctx.secret_values.insert(val);
                     }
@@ -1049,14 +1156,57 @@ impl RequestExecutionService {
         environment_name: Option<&str>,
         external_secrets: &std::collections::HashMap<String, String>,
     ) -> std::collections::HashSet<String> {
-        self.build_variable_scopes(
+        let mut scopes = self.build_variable_scopes(
             global_env_name,
             collection,
             environment_name,
             None,
             external_secrets,
+        );
+        // A secret that had names filled in is masked in its filled form too.
+        let ExpandedSend { secret_forms, .. } = expanded_send(
+            &scopes,
+            &std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+        );
+        scopes.secret_values.extend(secret_forms);
+        scopes.secret_values
+    }
+
+    /// The variables a send of `input` fills placeholders from, as `resolve_request_parts`
+    /// builds them: nested names filled and Flow variables on top. With `host_env`,
+    /// `{{process.env.NAME}}` resolves too, as the lowest layer, and is never filled.
+    pub(crate) fn send_variable_map(
+        &self,
+        input: &ExecuteRequestInput,
+        external_secrets: &std::collections::HashMap<String, String>,
+        host_env: bool,
+    ) -> std::collections::HashMap<String, String> {
+        let scopes = self.build_variable_scopes(
+            input.global_env_name.as_deref(),
+            input.collection.as_deref(),
+            input.environment_name.as_deref(),
+            input.request_path.as_deref(),
+            external_secrets,
+        );
+        let mut vars = expanded_send(
+            &scopes,
+            &input.flow_vars,
+            &mut std::collections::HashMap::new(),
         )
-        .secret_values
+        .values;
+        if host_env {
+            let env = self.process_env_for_scope(
+                input.collection.as_deref(),
+                input.environment_name.as_deref(),
+                input.global_env_name.as_deref(),
+                &ProcessEnvScopeInput::Scratch,
+            );
+            for (k, v) in env.vars {
+                vars.entry(format!("process.env.{k}")).or_insert(v);
+            }
+        }
+        vars
     }
 
     /// The RocketVault secret values of several environments at once, for masking text.
@@ -1470,7 +1620,7 @@ impl RequestExecutionService {
         } else {
             ProcessEnv::default()
         };
-        let mut scopes = self.build_variable_scopes(
+        let scopes = self.build_variable_scopes(
             input.global_env_name.as_deref(),
             input.collection.as_deref(),
             input.environment_name.as_deref(),
@@ -1478,11 +1628,18 @@ impl RequestExecutionService {
             external_secrets,
         );
         // Client certificates use the map without the host environment.
-        let mut plain_vars = scopes.flatten();
-        plain_vars.extend(input.flow_vars.clone());
-        scopes.process_env = process_env.vars.clone();
-        let mut vars = scopes.flatten_with_process_env();
-        vars.extend(input.flow_vars.clone());
+        // The stored values have their nested names filled. Host environment values are the
+        // lowest layer and are never filled, so they go in under the filled map.
+        let mut nested_dynamic = std::collections::HashMap::new();
+        let ExpandedSend {
+            values: plain_vars,
+            secret_forms,
+        } = expanded_send(&scopes, &input.flow_vars, &mut nested_dynamic);
+        let mut vars = plain_vars.clone();
+        for (k, v) in &process_env.vars {
+            vars.entry(format!("process.env.{k}"))
+                .or_insert_with(|| v.clone());
+        }
         let literal = &input.literal;
 
         // Merge collection and folder-chain auth and headers with request-level values.
@@ -1667,6 +1824,9 @@ impl RequestExecutionService {
             auth: auth_templates.into_inner(),
             unresolved: unresolved.into_inner(),
             literal_headers: literal.headers.clone(),
+            first_raw: std::collections::HashMap::new(),
+            first_values: std::collections::HashMap::new(),
+            nested_dynamic: std::collections::HashMap::new(),
         };
         let mut send_env = SendProcessEnv {
             dot_env_values: process_env
@@ -1706,6 +1866,9 @@ impl RequestExecutionService {
             request,
             templates,
             process_env: send_env,
+            nested_dynamic,
+            first_values: plain_vars,
+            secret_forms,
         })
     }
 
@@ -2035,6 +2198,48 @@ impl RequestExecutionService {
             calling_url: state.http_request.url.clone(),
             nested_process_env_values: Arc::clone(&state.nested_process_env_values),
             nested_withheld: Arc::clone(&state.nested_withheld),
+            nested_ran: Arc::clone(&state.nested_ran),
+            vault_forms: state.vault_forms.clone(),
+            pending: std::sync::Mutex::new(state.pending.clone()),
+        }
+    }
+
+    /// Reads the environment, global and collection scopes back from storage into `state`, after
+    /// a nested run saved its writes there. Secret names and values found are added, so they
+    /// stay masked. Runtime values come back through the script result instead. A failed read
+    /// keeps the current scopes and adds a Console warning. A value whose save failed in the
+    /// nested run is not reloaded.
+    fn reload_stored_scopes(&self, input: &ExecuteRequestInput, state: &mut PhaseState) {
+        let stored = self.scopes_inner(
+            true,
+            input.global_env_name.as_deref(),
+            input.collection.as_deref(),
+            input.environment_name.as_deref(),
+            None,
+            &state.external_secrets,
+        );
+        match stored {
+            Ok(stored) => {
+                state.var_ctx.env = stored.env;
+                state.var_ctx.global_env = stored.global_env;
+                state.var_ctx.collection = stored.collection;
+                state.var_ctx.secret_values.extend(stored.secret_values);
+                state.var_ctx.secret_keys.extend(stored.secret_keys);
+                // The reload wiped the caller's unsaved writes, so they go in again. A key whose
+                // stored value changed since is dropped, because the later write wins.
+                reapply_pending_writes(input, state);
+            }
+            Err(e) => {
+                let error =
+                    crate::redaction::redact_secrets(&e.to_string(), &state.var_ctx.secret_values);
+                state.console.push(ConsoleEntry {
+                    level: ConsoleLevel::Warn,
+                    message: format!(
+                        "Could not reload the stored variables after rok.runRequest: {error}. \
+                         The request keeps the values it had before the nested run."
+                    ),
+                });
+            }
         }
     }
 
@@ -2364,8 +2569,11 @@ impl RequestExecutionService {
             self.folder_chain(input.collection.as_deref(), input.request_path.as_deref())?;
         let ResolvedParts {
             request: http_request,
-            templates,
+            mut templates,
             process_env,
+            nested_dynamic,
+            first_values,
+            secret_forms,
         } = self.resolve_request_parts(input, external_secrets, &folder_chain)?;
 
         // Emit a sensitive-auth audit event BEFORE dispatch when the resolved
@@ -2400,6 +2608,14 @@ impl RequestExecutionService {
         var_ctx
             .secret_values
             .extend(process_env.dot_env_values.iter().cloned());
+        // The second pass compares against these values to find what the scripts changed.
+        templates.nested_dynamic = nested_dynamic;
+        templates.first_raw = var_ctx.flatten();
+        // The first pass built the same map from the same scopes, so it is not built twice.
+        templates.first_values = first_values;
+        // A secret value that had names filled in is masked in its filled form too, and so is a
+        // secret cut short inside another value.
+        var_ctx.secret_values.extend(secret_forms);
 
         let (sandbox_mode, file_scope, script_flow) = match input.collection.as_deref() {
             Some(col) => {
@@ -2482,7 +2698,10 @@ impl RequestExecutionService {
                 std::collections::HashSet::new(),
             )),
             nested_withheld: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            nested_ran: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nested: false,
+            pending: rocket_scripting::PendingWrites::default(),
+            pending_stored: PendingStored::default(),
             script_names: std::collections::HashSet::new(),
         })
     }
@@ -2645,6 +2864,16 @@ impl RequestExecutionService {
                     console: &mut state.console,
                 },
             );
+            prune_pending_written(state, &result);
+
+            // A nested run saved its writes, so the next script and the second pass read the
+            // scopes from storage again.
+            if state
+                .nested_ran
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.reload_stored_scopes(input, state);
+            }
 
             // The first error in phase order is kept. Within one script, a
             // thrown error still replaces its own setMethod warning.
@@ -2689,24 +2918,26 @@ impl RequestExecutionService {
             },
         )
         .await;
+        prune_pending_actions(input, state);
 
         // Runtime variables set above, or carried in by a run, fill the placeholders that are
         // still in the request. Every caller runs this phase, so each send path gets it.
         self.resolve_runtime_placeholders(input, mode, state)
     }
 
-    /// Puts runtime variables into the request once the pre-request scripts and actions ran:
-    /// the URL, path parameters, query, headers, body and auth.
+    /// Puts the values the pre-request scripts and actions changed into the request: the URL,
+    /// path parameters, query, headers, body and auth.
     ///
-    /// The first resolution in `begin_phases` runs before any script, so it cannot see runtime
-    /// variables. A field the scripts did not rewrite is rendered again from its template
-    /// (`runtime_fill`): each placeholder of the original text that names a runtime variable
-    /// gets that value, so runtime wins over every other scope, and every other placeholder keeps
-    /// its first value (a `{{$dynamic}}` value is never made twice). Values are put in as they are
-    /// and never read for placeholders again. Text a script wrote is filled only for names the
-    /// first pass could not resolve and names the script added, from every scope but the
-    /// RocketVault one. A URL this pass changes goes through the request guard. A skipped runner
-    /// step is left alone.
+    /// The first resolution in `begin_phases` runs before any script. Its values are kept in
+    /// `templates.first_values`. Here every scope is flattened again and `Overrides::between`
+    /// lists each name whose value changed, every runtime name and each name that no longer
+    /// resolves. A field the scripts did not rewrite is rendered again from its template
+    /// (`runtime_fill`): a changed name gets its new value, a removed name gets its placeholder
+    /// text back, and every other placeholder keeps its first value (a `{{$dynamic}}` value is
+    /// never made twice). Values are put in as they are and never read for placeholders again.
+    /// Text a script wrote is filled only for names the first pass could not resolve and names
+    /// the script added, from every scope but the RocketVault one. A URL this pass changes goes
+    /// through the request guard. A skipped runner step is left alone.
     fn resolve_runtime_placeholders(
         &self,
         input: &ExecuteRequestInput,
@@ -2717,10 +2948,27 @@ impl RequestExecutionService {
             return Ok(());
         }
         mask_runtime_values_of_secret_keys(&mut state.var_ctx);
-        if state.var_ctx.runtime.is_empty() && !has_placeholder(&state.http_request) {
+        let mut secret_fills = std::collections::HashSet::new();
+        let now = second_pass_values_recording(state, &mut secret_fills);
+        // Text a limit cut short in this pass is masked like the secret it came from.
+        let fill_forms: Vec<String> = secret_fills
+            .iter()
+            .flat_map(|fill| crate::redaction::redaction_forms(fill))
+            .collect();
+        state.var_ctx.secret_values.extend(fill_forms);
+        let overrides =
+            Overrides::between(&state.templates.first_values, &now, &state.var_ctx.runtime);
+        if overrides.is_empty() && !has_placeholder(&state.http_request) {
             return Ok(());
         }
-        let runtime = &state.var_ctx.runtime;
+        // A new value under a secret name is masked like the name's first value.
+        let forms: Vec<String> = overrides
+            .values
+            .iter()
+            .filter(|(name, _)| state.var_ctx.secret_keys.contains(*name))
+            .flat_map(|(_, value)| crate::redaction::redaction_forms(value))
+            .collect();
+        state.var_ctx.secret_values.extend(forms);
         let templates = &state.templates;
         // Script text never reaches the RocketVault scope, so a value built from response data
         // cannot pull a vault secret in.
@@ -2734,10 +2982,10 @@ impl RequestExecutionService {
         .collect();
 
         let mut request = state.http_request.clone();
-        let rendered_params = path_param_values(&templates.path_params, |t| t.render(runtime));
+        let rendered_params = path_param_values(&templates.path_params, |t| t.render(&overrides));
         if request.url == templates.url_output {
             request.url = rocket_http::substitute_path_params(
-                &templates.url.render(runtime),
+                &templates.url.render(&overrides),
                 &rendered_params,
             );
         } else {
@@ -2768,7 +3016,7 @@ impl RequestExecutionService {
         fill_pairs(
             &mut query,
             &templates.query,
-            runtime,
+            &overrides,
             &script_vars,
             &std::collections::HashSet::new(),
         );
@@ -2780,14 +3028,14 @@ impl RequestExecutionService {
         fill_pairs(
             &mut headers,
             &templates.headers,
-            runtime,
+            &overrides,
             &script_vars,
             &templates.literal_headers,
         );
         if let Some(body) = request.body.as_mut() {
             if let Some(content) = body.content.as_mut() {
                 *content = match &templates.body {
-                    Some(t) if t.output == *content => t.render(runtime),
+                    Some(t) if t.output == *content => t.render(&overrides),
                     Some(t) if t.is_literal() => content.clone(),
                     _ => fill_names(content, &script_vars),
                 };
@@ -2795,7 +3043,7 @@ impl RequestExecutionService {
             if let Some(entries) = body.form_data.as_mut() {
                 for (i, entry) in entries.iter_mut().enumerate() {
                     entry.value = match templates.form.get(i) {
-                        Some(t) if t.output == entry.value => t.render(runtime),
+                        Some(t) if t.output == entry.value => t.render(&overrides),
                         _ => fill_names(&entry.value, &script_vars),
                     };
                 }
@@ -2806,7 +3054,7 @@ impl RequestExecutionService {
             let at = index.get();
             index.set(at + 1);
             match templates.auth.get(at) {
-                Some(t) if t.output == field => t.render(runtime),
+                Some(t) if t.output == field => t.render(&overrides),
                 Some(t) if t.is_literal() => field,
                 _ => fill_names(&field, &script_vars),
             }
@@ -2918,6 +3166,7 @@ impl RequestExecutionService {
                     console: &mut state.console,
                 },
             );
+            prune_pending_written(state, &result);
             let failed = result.error.is_some();
             if failed && state.script_error.is_none() {
                 state.script_error = result.error;
@@ -2989,6 +3238,7 @@ impl RequestExecutionService {
                     console: &mut state.console,
                 },
             );
+            prune_pending_written(state, &result);
             state.test_results.extend(result.test_results.clone());
             let failed = result.error.is_some();
             if failed && state.script_error.is_none() {
@@ -3132,6 +3382,8 @@ impl RequestExecutionService {
                 .iter()
                 .cloned(),
         );
+        let vault_values: std::collections::HashSet<String> =
+            state.external_secrets.values().cloned().collect();
         ExecuteRequestOutput {
             response,
             test_results: state.test_results.clone(),
@@ -3142,6 +3394,11 @@ impl RequestExecutionService {
             run_sent_credentials: sent_credentials(&state.http_request),
             run_process_env_values,
             process_env_withheld: state.process_env_withheld(true),
+            sent_request: Some(sent_request_masked(
+                &http_request,
+                &vault_values,
+                &state.var_ctx.secret_values,
+            )),
         }
     }
 
@@ -3264,14 +3521,17 @@ impl RequestExecutionService {
     /// Runs a saved request for `rok.runRequest` with every phase, as a single send does.
     ///
     /// `chain` is the call chain the nested run belongs to, its own path last, and
-    /// `runtime` seeds its runtime variables. Returns the output and the runtime
-    /// variables the run ended with.
+    /// `runtime` seeds its runtime variables. `pending` holds the caller's unsaved
+    /// environment, global and collection writes, which the run sees in memory only.
+    /// Returns the output and the runtime variables the run ended with.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_nested(
         &self,
         input: ExecuteRequestInput,
         external_secrets: &std::collections::HashMap<String, String>,
         chain: Vec<String>,
         runtime: &std::collections::HashMap<String, String>,
+        pending: &rocket_scripting::PendingWrites,
         unresolved: &Arc<Vec<UnresolvedAlias>>,
         active_runs: &Arc<std::sync::atomic::AtomicUsize>,
     ) -> DomainResult<(
@@ -3283,6 +3543,9 @@ impl RequestExecutionService {
         state.active_runs = Arc::clone(active_runs);
         state.run_chain = chain;
         state.seed_runtime(runtime);
+        state.pending = pending.clone();
+        // The second pass sees these as changed values and fills the request with them.
+        overlay_pending_writes(&input, &mut state, pending);
         state.nested = true;
         self.run_before_request_phase(&input, ExecutionMode::Standalone, &mut state)
             .await?;
@@ -3490,6 +3753,235 @@ fn mirror_env_writes(
     }
 }
 
+/// Drops a pending key from the list and from its stored snapshot.
+fn drop_pending_keys(
+    list: &mut Vec<(String, Option<String>)>,
+    snapshot: &mut std::collections::HashMap<String, Option<String>>,
+    mut written: impl FnMut(&str) -> bool,
+) {
+    list.retain(|(key, _)| !written(key));
+    snapshot.retain(|key, _| !written(key));
+}
+
+/// Drops the pending keys that a script phase wrote, because its write is the later one. The
+/// next script host and the next reload then see that write. A delete counts as a write.
+fn prune_pending_written(state: &mut PhaseState, result: &ScriptResult) {
+    let PhaseState {
+        pending,
+        pending_stored,
+        ..
+    } = state;
+    drop_pending_keys(&mut pending.env, &mut pending_stored.env, |key| {
+        result.env_var_writes.iter().any(|w| w.key == key)
+    });
+    drop_pending_keys(
+        &mut pending.global_env,
+        &mut pending_stored.global_env,
+        |key| result.global_env_var_writes.iter().any(|w| w.key == key),
+    );
+    drop_pending_keys(
+        &mut pending.collection,
+        &mut pending_stored.collection,
+        |key| result.collection_var_writes.iter().any(|w| w.key == key),
+    );
+}
+
+/// Drops the pending keys that an enabled before-request action writes to storage, because the
+/// action's write is the later one. Of the pending scopes, actions write only the environment
+/// and the collection.
+fn prune_pending_actions(input: &ExecuteRequestInput, state: &mut PhaseState) {
+    let PhaseState {
+        pending,
+        pending_stored,
+        ..
+    } = state;
+    let named = |scope: &'static str| {
+        input
+            .actions
+            .iter()
+            .filter(move |a| {
+                a.disabled != Some(true) && a.phase == "before-request" && a.variable.scope == scope
+            })
+            .map(|a| a.variable.name.as_str())
+    };
+    if input.environment_name.is_some() {
+        drop_pending_keys(&mut pending.env, &mut pending_stored.env, |key| {
+            named("environment").any(|n| n == key)
+        });
+    }
+    drop_pending_keys(
+        &mut pending.collection,
+        &mut pending_stored.collection,
+        |key| named("collection").any(|n| n == key),
+    );
+}
+
+/// The stored value of each pending key, per scope, when the writes were first applied.
+#[derive(Default)]
+pub(crate) struct PendingStored {
+    env: std::collections::HashMap<String, Option<String>>,
+    global_env: std::collections::HashMap<String, Option<String>>,
+    collection: std::collections::HashMap<String, Option<String>>,
+}
+
+/// Puts the calling script's unsaved writes into a nested run's scopes, in memory only. A scope
+/// with nothing selected is skipped, because the caller drops those writes too. A value that
+/// holds a RocketVault secret goes to runtime with the usual Console warning. The stored value
+/// of each key is remembered, so a reload can tell a later write from an untouched key.
+fn overlay_pending_writes(
+    input: &ExecuteRequestInput,
+    state: &mut PhaseState,
+    pending: &rocket_scripting::PendingWrites,
+) {
+    let snap = |scope: &std::collections::HashMap<String, String>,
+                list: &[(String, Option<String>)],
+                out: &mut std::collections::HashMap<String, Option<String>>| {
+        for (key, _) in list {
+            out.entry(key.clone())
+                .or_insert_with(|| scope.get(key).cloned());
+        }
+    };
+    if input.environment_name.is_some() {
+        snap(
+            &state.var_ctx.env,
+            &pending.env,
+            &mut state.pending_stored.env,
+        );
+    }
+    if input.global_env_name.is_some() {
+        snap(
+            &state.var_ctx.global_env,
+            &pending.global_env,
+            &mut state.pending_stored.global_env,
+        );
+    }
+    if input.collection.is_some() {
+        snap(
+            &state.var_ctx.collection,
+            &pending.collection,
+            &mut state.pending_stored.collection,
+        );
+    }
+    add_pending_secret_forms(state, pending);
+    apply_pending_writes(input, state, pending, true);
+}
+
+/// Adds the redaction forms of each pending value under a secret name, so the nested run's
+/// Console, History and sent request mask it.
+fn add_pending_secret_forms(state: &mut PhaseState, pending: &rocket_scripting::PendingWrites) {
+    let PhaseState { var_ctx, .. } = state;
+    for (key, value) in pending
+        .env
+        .iter()
+        .chain(&pending.global_env)
+        .chain(&pending.collection)
+    {
+        if let Some(value) = value {
+            if var_ctx.secret_keys.contains(key) {
+                var_ctx
+                    .secret_values
+                    .extend(crate::redaction::redaction_forms(value));
+            }
+        }
+    }
+}
+
+/// Applies the pending writes again after a reload. Only keys whose stored value is still the
+/// one seen at the first overlay come back, and the other keys leave `state.pending` for good.
+fn reapply_pending_writes(input: &ExecuteRequestInput, state: &mut PhaseState) {
+    let keep = |list: &[(String, Option<String>)],
+                scope: &std::collections::HashMap<String, String>,
+                snapshot: &std::collections::HashMap<String, Option<String>>|
+     -> Vec<(String, Option<String>)> {
+        list.iter()
+            .filter(|(key, _)| {
+                snapshot
+                    .get(key)
+                    .is_some_and(|old| old.as_ref() == scope.get(key))
+            })
+            .cloned()
+            .collect()
+    };
+    let kept = rocket_scripting::PendingWrites {
+        env: keep(
+            &state.pending.env,
+            &state.var_ctx.env,
+            &state.pending_stored.env,
+        ),
+        global_env: keep(
+            &state.pending.global_env,
+            &state.var_ctx.global_env,
+            &state.pending_stored.global_env,
+        ),
+        collection: keep(
+            &state.pending.collection,
+            &state.var_ctx.collection,
+            &state.pending_stored.collection,
+        ),
+    };
+    state.pending = kept.clone();
+    apply_pending_writes(input, state, &kept, false);
+}
+
+/// Writes the pending values into the scopes. `warn` is false on a re-apply, so a held-back
+/// vault value does not repeat its Console warning.
+fn apply_pending_writes(
+    input: &ExecuteRequestInput,
+    state: &mut PhaseState,
+    pending: &rocket_scripting::PendingWrites,
+    warn: bool,
+) {
+    let as_writes = |list: &[(String, Option<String>)]| -> Vec<rocket_scripting::EnvVarWrite> {
+        list.iter()
+            .map(|(key, value)| rocket_scripting::EnvVarWrite {
+                key: key.clone(),
+                value: value
+                    .clone()
+                    .map_or(serde_json::Value::Null, serde_json::Value::String),
+                persist: false,
+            })
+            .collect()
+    };
+    let PhaseState {
+        var_ctx,
+        vault_forms,
+        console,
+        ..
+    } = state;
+    let mut scratch = Vec::new();
+    let console = if warn { console } else { &mut scratch };
+    if input.environment_name.is_some() {
+        let kept = hold_back_vault_writes(
+            &as_writes(&pending.env),
+            "environment",
+            vault_forms,
+            var_ctx,
+            console,
+        );
+        mirror_env_writes(&mut var_ctx.env, &kept);
+    }
+    if input.global_env_name.is_some() {
+        let kept = hold_back_vault_writes(
+            &as_writes(&pending.global_env),
+            "global environment",
+            vault_forms,
+            var_ctx,
+            console,
+        );
+        mirror_env_writes(&mut var_ctx.global_env, &kept);
+    }
+    if input.collection.is_some() {
+        let kept = hold_back_vault_writes(
+            &as_writes(&pending.collection),
+            "collection variable",
+            vault_forms,
+            var_ctx,
+            console,
+        );
+        mirror_env_writes(&mut var_ctx.collection, &kept);
+    }
+}
+
 /// Merges a script's runtime writes and deletes into the variable context.
 ///
 /// Non-string values are kept as JSON text so a number or object set with
@@ -3595,7 +4087,7 @@ fn resolve_auth(auth: Auth, vars: &std::collections::HashMap<String, String>) ->
 }
 
 /// Applies `r` to each credential field of an auth value that variables may fill.
-fn map_auth_fields(auth: Auth, r: impl Fn(String) -> String) -> Auth {
+pub(crate) fn map_auth_fields(auth: Auth, r: impl Fn(String) -> String) -> Auth {
     match auth {
         Auth::Basic { username, password } => Auth::Basic {
             username: r(username),
@@ -6943,6 +7435,82 @@ mod tests {
 
         let url = exec_arc.last_url.lock().unwrap().clone().unwrap();
         assert_eq!(url, "https://api.example.com/req-tok");
+    }
+
+    /// Sends `{{token}}` with env `token = abc` under the given variable scopes. Returns the url.
+    async fn url_with_token_scopes(
+        settings: CollectionSettings,
+        folder_vars: Vec<CollectionVariable>,
+        request_vars: Vec<CollectionVariable>,
+    ) -> String {
+        let mut env = Environment::new("prod");
+        env.set_variable(Variable::new("token", "abc"));
+        let repo = StubCollectionRepo::with_settings(settings)
+            .with_folder_vars(folder_vars)
+            .with_request_vars(request_vars);
+        let executor = Arc::new(MockExecutor::new(200));
+        struct SharedExecEmpty(Arc<MockExecutor>);
+        #[async_trait]
+        impl HttpExecutor for SharedExecEmpty {
+            async fn execute(&self, req: &HttpRequest) -> DomainResult<HttpResponse> {
+                self.0.execute(req).await
+            }
+        }
+        let exec_arc = Arc::clone(&executor);
+        let svc = RequestExecutionService::new(
+            Box::new(MockEnvRepo::with_env(env)),
+            Arc::new(SharedExecEmpty(executor)),
+            Box::new(MockHistoryRepo::new()),
+            Box::new(repo),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        );
+        let mut input = sample_input("https://api.example.com/Bearer-{{token}}", Some("prod"));
+        input.collection = Some("my-api".into());
+        input.request_path = Some("items/get.yml".into());
+        svc.execute(input).await.expect("execute");
+        let url = exec_arc.last_url.lock().expect("lock").clone();
+        url.expect("a url")
+    }
+
+    #[tokio::test]
+    async fn an_empty_request_variable_does_not_hide_the_env_value() {
+        let url =
+            url_with_token_scopes(CollectionSettings::default(), vec![], vec![cv("token", "")])
+                .await;
+        assert_eq!(url, "https://api.example.com/Bearer-abc");
+    }
+
+    #[tokio::test]
+    async fn an_empty_folder_or_collection_variable_does_not_hide_the_env_value() {
+        let settings = CollectionSettings {
+            variables: vec![cv("token", "")],
+            ..Default::default()
+        };
+        let url = url_with_token_scopes(settings, vec![cv("token", "")], vec![]).await;
+        assert_eq!(url, "https://api.example.com/Bearer-abc");
+    }
+
+    #[tokio::test]
+    async fn a_non_empty_request_variable_still_wins_over_the_env_value() {
+        let url = url_with_token_scopes(
+            CollectionSettings::default(),
+            vec![],
+            vec![cv("token", "req")],
+        )
+        .await;
+        assert_eq!(url, "https://api.example.com/Bearer-req");
+    }
+
+    #[tokio::test]
+    async fn an_initial_value_is_used_when_the_request_variable_value_is_empty() {
+        let mut var = cv("token", "");
+        var.initial_value = "init".into();
+        let url = url_with_token_scopes(CollectionSettings::default(), vec![], vec![var]).await;
+        assert_eq!(url, "https://api.example.com/Bearer-init");
     }
 
     #[tokio::test]
@@ -12007,6 +12575,16 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_alias_adds_its_filled_value_to_secret_values() {
+        let mut dev = Environment::new("dev");
+        dev.set_variable(Variable::secret("apiKey", "{{rawKey}}"));
+        dev.set_variable(Variable::new("rawKey", "raw-key-123456"));
+        let svc = inherit_svc(vec![dev]);
+        let values = svc.secret_values(None, None, Some("dev"), &Default::default());
+        assert!(values.contains("raw-key-123456"), "{values:?}");
+    }
+
+    #[test]
     fn an_inherited_secret_is_in_secret_values() {
         let mut base = Environment::new("base");
         base.set_variable(Variable::secret("TOKEN", "parent-secret-value"));
@@ -12634,6 +13212,18 @@ mod tests {
         Arc<CapturingExecutor>,
         Arc<Mutex<Vec<HistoryEntry>>>,
     ) {
+        runtime_svc_with_repo(env_repo, StubCollectionRepo::empty(), engine)
+    }
+
+    fn runtime_svc_with_repo(
+        env_repo: MockEnvRepo,
+        repo: StubCollectionRepo,
+        engine: Box<dyn ScriptEngine>,
+    ) -> (
+        RequestExecutionService,
+        Arc<CapturingExecutor>,
+        Arc<Mutex<Vec<HistoryEntry>>>,
+    ) {
         let executor = Arc::new(CapturingExecutor {
             sent: Mutex::new(None),
         });
@@ -12643,7 +13233,7 @@ mod tests {
             Box::new(env_repo),
             Arc::clone(&executor) as Arc<dyn HttpExecutor>,
             Box::new(history),
-            Box::new(StubCollectionRepo::empty()),
+            Box::new(repo),
             Box::new(NullCookieRepo),
             Box::new(NullEventPublisher),
             Box::new(EmptySecretManagerRepo),
@@ -12895,6 +13485,7 @@ mod tests {
             &std::collections::HashMap::new(),
             vec![],
             &runtime,
+            &rocket_scripting::PendingWrites::default(),
             &Arc::new(Vec::new()),
             &Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         )
@@ -12907,7 +13498,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_placeholder_inside_an_env_or_vault_value_stays_literal() {
+    async fn a_vault_placeholder_inside_an_env_value_stays_literal() {
         let mut env = Environment::new("dev");
         env.set_variable(Variable::secret("apiKey", "env-secret-123456"));
         env.set_variable(Variable::new(
@@ -12929,7 +13520,7 @@ mod tests {
 
         assert_eq!(
             executor_request(&executor).url,
-            "https://evil.test/?k={{apiKey}}&v={{vault.key}}&t=tok-1"
+            "https://evil.test/?k=env-secret-123456&v={{vault.key}}&t=tok-1"
         );
     }
 
@@ -13141,6 +13732,38 @@ mod tests {
             .iter()
             .all(|h| !h.value.contains("real-jwt-abc123")));
         assert!(!record.url.contains("real-jwt-abc123"), "{}", record.url);
+    }
+
+    #[tokio::test]
+    async fn an_empty_secret_collection_variable_still_masks_a_script_value() {
+        let settings = CollectionSettings {
+            variables: vec![CollectionVariable {
+                key: "token".into(),
+                value: String::new(),
+                initial_value: String::new(),
+                enabled: true,
+                secret: true,
+            }],
+            ..Default::default()
+        };
+        let engine =
+            MockBeforeRequestEngine::returning(runtime_result(&[("token", "real-jwt-abc123")]));
+        let (svc, executor, saved) = runtime_svc_with_repo(
+            MockEnvRepo::empty(),
+            StubCollectionRepo::with_settings(settings),
+            Box::new(engine),
+        );
+        let mut input = sample_input("https://api.test/?t={{token}}", None);
+        input.collection = Some("my-api".into());
+        input.request_path = Some("items/get.yml".into());
+        input.pre_request_script = Some("// pre".into());
+        input.headers = vec![Header::new("X-Token", "{{token}}")];
+        let output = svc.execute(input).await.expect("execute");
+        let request = executor_request(&executor);
+        assert_eq!(header_value(&request, "X-Token"), Some("real-jwt-abc123"));
+        let history_url = saved.lock().expect("lock")[0].url.clone();
+        assert!(!history_url.contains("real-jwt-abc123"), "{history_url}");
+        assert!(output.run_secret_values.contains("real-jwt-abc123"));
     }
 
     // ── Backend sends resolve gated process env (issue #112) ─────────────────

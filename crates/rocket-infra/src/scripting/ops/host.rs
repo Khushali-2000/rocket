@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use deno_core::{op2, OpState};
 use rocket_scripting::{
-    ConsoleLevel, HostCookieOp, HostCookieResult, HostError, HostRequest, HostRunOutcome,
-    HostRunRequest,
+    CollectionVarWrite, ConsoleLevel, EnvVarWrite, HostCookieOp, HostCookieResult, HostError,
+    HostRequest, HostRunOutcome, HostRunRequest, PendingWrites,
 };
 use tokio::sync::oneshot;
 
@@ -136,6 +136,37 @@ pub async fn op_rok_sleep(state: Rc<RefCell<OpState>>, ms: f64) {
     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
 }
 
+/// A write value as the text a scope holds, as the caller would save it. `null` deletes.
+fn write_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// The calling script's unsaved environment, global and collection writes, in order.
+fn pending_writes(state: &OpState) -> PendingWrites {
+    let out = state.borrow::<ScriptOutputState>();
+    let env_list = |writes: &[EnvVarWrite]| -> Vec<(String, Option<String>)> {
+        writes
+            .iter()
+            .map(|w| (w.key.clone(), write_text(&w.value)))
+            .collect()
+    };
+    let collection_list = |writes: &[CollectionVarWrite]| -> Vec<(String, Option<String>)> {
+        writes
+            .iter()
+            .map(|w| (w.key.clone(), write_text(&w.value)))
+            .collect()
+    };
+    PendingWrites {
+        env: env_list(&out.env_var_writes),
+        global_env: env_list(&out.global_env_var_writes),
+        collection: collection_list(&out.collection_var_writes),
+    }
+}
+
 /// Runtime variables the calling script sees right now: its snapshot plus its own writes.
 fn current_runtime_vars(state: &OpState) -> HashMap<String, String> {
     let mut vars = state.borrow::<ScriptInputState>().variables.runtime.clone();
@@ -254,9 +285,11 @@ pub async fn op_rok_run_request(
 ) -> Result<String, ScriptHostError> {
     const API: &str = "rok.runRequest";
     let runtime_vars = current_runtime_vars(&state.borrow());
+    let pending = pending_writes(&state.borrow());
     let request = HostRunRequest {
         path: path.clone(),
         runtime_vars,
+        pending,
     };
     let (reply, answer) = oneshot::channel();
     send_host_call(&state, HostCall::Run { request, reply }, API)?;

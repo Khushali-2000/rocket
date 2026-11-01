@@ -1,6 +1,7 @@
 use rocket_app::graphql_document::{list_operations, GraphQlOperation};
 use rocket_app::{
     ExecuteGraphQlInput, ExecuteRequestInput, ExecuteRequestOutput, RequestExecutionService,
+    SentRequest,
 };
 use rocket_scripting::{ConsoleLevel, TestStatus};
 use rocket_shared::error::DomainError;
@@ -42,6 +43,9 @@ pub struct ExecuteRequestResponse {
     pub test_results: Vec<IpcTestResult>,
     pub console_entries: Vec<IpcConsoleEntry>,
     pub script_error: Option<String>,
+    /// The request as sent, with RocketVault values masked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_request: Option<SentRequest>,
 }
 
 impl From<ExecuteRequestOutput> for ExecuteRequestResponse {
@@ -81,6 +85,7 @@ impl From<ExecuteRequestOutput> for ExecuteRequestResponse {
                 })
                 .collect(),
             script_error: out.script_error,
+            sent_request: out.sent_request,
         }
     }
 }
@@ -146,6 +151,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            sent_request: None,
         };
         let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");
         assert_eq!(json["isBinary"], true);
@@ -164,9 +170,38 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            sent_request: None,
         };
         let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");
         assert!(json.get("isBinary").is_none());
         assert!(json.get("bodyBase64").is_none());
+        assert!(json.get("sentRequest").is_none());
+    }
+
+    #[test]
+    fn the_sent_request_reaches_the_ipc_response() {
+        let sent = SentRequest {
+            url: "https://api.test/v1".into(),
+            headers: vec![rocket_shared::types::Header::new("X-A", "1")],
+            query_params: vec![rocket_shared::types::Header::new("q", "2")],
+            body: None,
+            auth: rocket_shared::types::Auth::None,
+            secret_values: vec![],
+        };
+        let out = ExecuteRequestOutput {
+            response: HttpResponse::default(),
+            test_results: vec![],
+            console_entries: vec![],
+            script_error: None,
+            deferred_history: None,
+            run_secret_values: Default::default(),
+            run_sent_credentials: Default::default(),
+            run_process_env_values: Default::default(),
+            process_env_withheld: false,
+            sent_request: Some(sent),
+        };
+        let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");
+        assert_eq!(json["sentRequest"]["url"], "https://api.test/v1");
+        assert_eq!(json["sentRequest"]["queryParams"][0]["key"], "q");
     }
 }

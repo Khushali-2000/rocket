@@ -10,7 +10,7 @@ pub use context::{ExecutionMode, SandboxMode, ScriptContext, ScriptFileScope};
 pub use engine::ScriptEngine;
 pub use host::{
     HostCookieOp, HostCookieResult, HostError, HostRequest, HostResponse, HostRunOutcome,
-    HostRunRequest, HostScopes, ScriptHost,
+    HostRunRequest, HostScopes, PendingWrites, ScriptHost,
 };
 pub use phase::ScriptPhase;
 pub use result::{
