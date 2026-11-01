@@ -17,16 +17,16 @@ Surfaces are raw HSL triples, shadows are full `box-shadow` values. All are in `
 | `--elevation-surface-bg` | `210 5% 10%` (`#191A1B`) | `220 21.4% 94.5%` | the shell |
 | `--elevation-raised-bg` | `210 5% 10%` (`#191A1B`) | `240 50% 99%` | sideBar.background |
 | `--elevation-overlay-bg` | `210 3% 13%` (`#202122`) | `0 0% 100%` | editorWidget.background |
-| `--elevation-shadow-raised` | `2px 0 6px rgba(0,0,0,0.45), 6px 0 16px rgba(0,0,0,0.3)` | `2px 0 4px rgba(0,0,0,0.08), 4px 0 12px rgba(0,0,0,0.05)` | sidebar edge |
-| `--elevation-shadow-chrome` | `0 2px 4px rgba(0,0,0,0.4), 0 4px 10px rgba(0,0,0,0.25)` | `0 2px 4px rgba(0,0,0,0.06), 0 4px 10px rgba(0,0,0,0.04)` | page chrome over content |
-| `--elevation-shadow-pinned` | `0 -2px 4px rgba(0,0,0,0.4), 0 -4px 10px rgba(0,0,0,0.25)` | `0 -2px 4px rgba(0,0,0,0.06), 0 -4px 10px rgba(0,0,0,0.04)` | status bar edge |
-| `--elevation-shadow-lift` | `0 1px 2px rgba(0,0,0,0.5), 0 2px 5px rgba(0,0,0,0.35)` | `0 1px 2px rgba(0,0,0,0.12), 0 2px 5px rgba(0,0,0,0.08)` | primary button |
-| `--elevation-shadow-overlay` | `0 2px 6px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.55)` | `0 2px 6px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.18)` | floating UI |
+| `--elevation-shadow-raised` | `2px 0 6px rgba(0,0,0,0.28), 6px 0 16px rgba(0,0,0,0.18)` | `2px 0 4px rgba(0,0,0,0.08), 4px 0 12px rgba(0,0,0,0.05)` | sidebar edge |
+| `--elevation-shadow-chrome` | `0 2px 4px rgba(0,0,0,0.24), 0 4px 10px rgba(0,0,0,0.15)` | `0 2px 4px rgba(0,0,0,0.06), 0 4px 10px rgba(0,0,0,0.04)` | page chrome over content |
+| `--elevation-shadow-pinned` | `0 -2px 4px rgba(0,0,0,0.24), 0 -4px 10px rgba(0,0,0,0.15)` | `0 -2px 4px rgba(0,0,0,0.06), 0 -4px 10px rgba(0,0,0,0.04)` | status bar edge |
+| `--elevation-shadow-lift` | `0 1px 2px rgba(0,0,0,0.3), 0 2px 5px rgba(0,0,0,0.2)` | `0 1px 2px rgba(0,0,0,0.12), 0 2px 5px rgba(0,0,0,0.08)` | primary button |
+| `--elevation-shadow-overlay` | `0 2px 6px rgba(0,0,0,0.28), 0 8px 24px rgba(0,0,0,0.4)` | `0 2px 6px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.18)` | floating UI |
 
 Classes: `.elevation-sunken`, `.elevation-surface`, `.elevation-raised`, `.elevation-overlay`. Tailwind
 colours: `bg-elevation-sunken|surface|raised|overlay`. Do not put a `bg-*` utility on the same element
 as an `.elevation-*` class that sets a fill. The shadow-only helpers (`elevation-chrome`,
-`elevation-pinned`) set no fill and may sit next to any `bg-*`. All shadow tokens are black only.
+`elevation-pinned`) set no fill and may sit next to any `bg-*`. All shadow tokens are black only. In dark the alphas are soft (about 0.15 to 0.4) so the shadow reads as a gentle shade, not a hard edge; they stay above the light alphas.
 
 ## Rules
 
