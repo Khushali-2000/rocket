@@ -43,6 +43,7 @@ mod flow_request_ref_e2e_tests;
 pub(crate) mod flow_routing;
 pub(crate) mod flow_run_cache;
 pub(crate) mod flow_run_id;
+mod flow_script_literals;
 pub mod flow_service;
 pub(crate) mod flow_trace;
 pub(crate) mod flow_wait;
