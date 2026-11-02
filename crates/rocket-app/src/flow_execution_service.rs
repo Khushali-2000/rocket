@@ -1689,6 +1689,7 @@ impl FlowExecutionService {
         // rebinds `secret_values` later, so this set is built first.
         let mut trace_masks = secret_values.clone();
         trace_masks.extend(credentials.secret_forms());
+        let mut script_scope = ScriptScope::default();
         match &node.kind {
             FlowNodeKind::Input { value, .. } => {
                 // Resolve with the scope a request uses (global < collection <
@@ -1743,11 +1744,12 @@ impl FlowExecutionService {
                     Ok(output) => output,
                     Err(e) => return Err(fail_wire(trace, edge, e, &trace_masks)),
                 };
-                let expression = resolve_script_source(
+                let expression = script_scope.resolve(
                     exec,
                     input,
                     ctx,
                     external_secrets,
+                    callbacks.vars(),
                     logs,
                     &edge.expression,
                 );
@@ -1826,11 +1828,12 @@ impl FlowExecutionService {
                         Ok(output) => output,
                         Err(e) => return Err(fail_wire(trace, edge, e, &trace_masks)),
                     };
-                    let expression = resolve_script_source(
+                    let expression = script_scope.resolve(
                         exec,
                         input,
                         ctx,
                         external_secrets,
+                        callbacks.vars(),
                         logs,
                         &edge.expression,
                     );
@@ -2053,8 +2056,15 @@ impl FlowExecutionService {
             FlowNodeKind::Transform { script, .. } => {
                 let source = single_input(node, data_edges, captured, trace, &trace_masks)?;
                 record_input_wire(trace, data_edges, source, &trace_masks);
-                let script_text =
-                    resolve_script_source(exec, input, ctx, external_secrets, logs, script);
+                let script_text = script_scope.resolve(
+                    exec,
+                    input,
+                    ctx,
+                    external_secrets,
+                    callbacks.vars(),
+                    logs,
+                    script,
+                );
                 let outcome = exec
                     .evaluate_flow_transform_value(
                         &input.collection,
@@ -2249,39 +2259,76 @@ fn record_input_wire(
     }
 }
 
-/// Fills `{{name}}` placeholders written inside string literals of a wire or
-/// Transform script, with the scope the Input node uses. A source without `{{`
-/// is returned as it is, and no scope is built.
-fn resolve_script_source(
-    exec: &RequestExecutionService,
-    input: &RunFlowInput,
-    ctx: &NodeRunContext,
-    external_secrets: &HashMap<String, String>,
-    logs: &mut Vec<FlowLogEntry>,
-    source: &str,
-) -> String {
-    if !source.contains("{{") {
-        return source.to_string();
+/// The variables one node's scripts fill `{{name}}` placeholders from.
+///
+/// It is built once, on the first source that has a placeholder, and every wire
+/// and Transform script of the node shares it. Dynamic names (`{{$guid}}`) are
+/// generated per occurrence. A resolved value is never scanned again.
+#[derive(Default)]
+struct ScriptScope {
+    vars: Option<HashMap<String, String>>,
+    masks: HashSet<String>,
+    warned: bool,
+}
+
+impl ScriptScope {
+    /// Forms of nested secret values that a log or error must mask.
+    #[allow(dead_code)]
+    fn extra_masks(&self) -> &HashSet<String> {
+        &self.masks
     }
-    // The host map is copied only for a source that names `process.env`.
-    let names_process_env = crate::flow_script_literals::script_names_process_env(source);
-    let no_process_env = HashMap::new();
-    let vars = exec.variable_context_with_process_env(
-        input.global_env_name.as_deref(),
-        Some(&input.collection),
-        input.environment_name.as_deref(),
-        None,
-        external_secrets,
-        if names_process_env {
-            &ctx.process_env.vars
-        } else {
-            &no_process_env
-        },
-    );
-    if !ctx.process_env.allowed && names_process_env {
-        logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
+
+    /// Fills the placeholders written inside string literals of `source`. A
+    /// source without `{{` is returned as it is, and no scope is built.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve(
+        &mut self,
+        exec: &RequestExecutionService,
+        input: &RunFlowInput,
+        ctx: &NodeRunContext,
+        external_secrets: &HashMap<String, String>,
+        callbacks: &HashMap<String, String>,
+        logs: &mut Vec<FlowLogEntry>,
+        source: &str,
+    ) -> String {
+        if !source.contains("{{") {
+            return source.to_string();
+        }
+        if !ctx.process_env.allowed
+            && !self.warned
+            && crate::flow_script_literals::script_names_process_env(source)
+        {
+            self.warned = true;
+            logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
+        }
+        if self.vars.is_none() {
+            let scopes = exec.flow_variable_scopes(
+                input.global_env_name.as_deref(),
+                Some(&input.collection),
+                input.environment_name.as_deref(),
+                external_secrets,
+            );
+            let expanded =
+                crate::execution_service::expanded_send(&scopes, callbacks, &mut HashMap::new());
+            self.masks.extend(expanded.secret_forms);
+            let mut vars = expanded.values;
+            // Host values are the lowest layer and are never filled.
+            if ctx.process_env.allowed {
+                for (k, v) in &ctx.process_env.vars {
+                    vars.entry(format!("process.env.{k}"))
+                        .or_insert_with(|| v.clone());
+                }
+            }
+            self.vars = Some(vars);
+        }
+        let vars = self.vars.get_or_insert_with(HashMap::new);
+        crate::flow_script_literals::resolve_script_literals_with(source, &mut |name| match name
+            .strip_prefix('$')
+        {
+            Some(dynamic) => rocket_environment::dynamic_vars::generate(dynamic),
+            None => vars.get(name).cloned(),
+        })
     }
-    crate::flow_script_literals::resolve_script_literals(source, &vars)
 }
 
 /// Marks `edge` as failed in the trace and returns its error, named after
@@ -11084,6 +11131,133 @@ mod tests {
 
         let sent = executor.sent_bodies()[1].clone().unwrap_or_default();
         assert!(sent.contains("k-123"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_script_resolves_a_callback_variable() {
+        let flow = Flow {
+            name: "cb".to_string(),
+            nodes: vec![
+                request_flow_node("a", "https://api.example.com/a"),
+                request_flow_node("b", "https://api.example.com/b"),
+                wait_node("w", "hook"),
+            ],
+            edges: vec![
+                FlowEdge {
+                    target_field: "body".to_string(),
+                    expression: "return '{{callback.hook}}';".to_string(),
+                    ..wire("e1", "a", "b")
+                },
+                trigger_edge("e2", "b", handle::RESULT, "w"),
+            ],
+            callback_host: None,
+        };
+        let fake = crate::test_doubles::FakeCallbackListener::new();
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+
+        service_with_listener(flow, &fake)
+            .run(&exec, run_input("cb"))
+            .await
+            .expect("run");
+
+        assert_eq!(
+            executor.sent_bodies()[1].as_deref(),
+            Some("http://fake:1/cb/0")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_resolves_a_dynamic_name() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+
+        run_body_wire(&exec, &executor, "return '{{$guid}}|{{$guid}}';", "x").await;
+
+        let sent = executor.sent_bodies()[1].clone().unwrap_or_default();
+        let (first, second) = sent.split_once('|').expect("two values");
+        assert_eq!(first.len(), 36, "{sent}");
+        assert_eq!(second.len(), 36, "{sent}");
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn a_script_resolves_a_nested_variable() {
+        let mut collection = rocket_collection::Collection::new("my-api");
+        collection
+            .settings
+            .variables
+            .push(collection_var("base", "ann"));
+        collection
+            .settings
+            .variables
+            .push(collection_var("user", "{{base}}"));
+        let executor = RecordingExecutor::new();
+        let exec = exec_with_collection(&executor, collection);
+
+        run_body_wire(&exec, &executor, "return '{{user}}';", "x").await;
+
+        assert_eq!(executor.sent_bodies()[1].as_deref(), Some("ann"));
+    }
+
+    #[tokio::test]
+    async fn a_resolved_value_is_not_scanned_again() {
+        let mut collection = rocket_collection::Collection::new("my-api");
+        collection
+            .settings
+            .variables
+            .push(collection_var("apiKey", "k-123"));
+        collection
+            .settings
+            .variables
+            .push(collection_var("note", "{{process.env.HOME}}"));
+        let executor = RecordingExecutor::new();
+        let exec = exec_with_collection(&executor, collection)
+            .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+
+        run_body_wire(&exec, &executor, "return '{{note}}';", "x").await;
+
+        assert_eq!(
+            executor.sent_bodies()[1].as_deref(),
+            Some("{{process.env.HOME}}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_with_several_wires_warns_once_about_withheld_process_env() {
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                request_flow_node("a", "https://api.example.com/a"),
+                request_flow_node("c", "https://api.example.com/c"),
+                request_flow_node("b", "https://api.example.com/b"),
+            ],
+            edges: vec![
+                FlowEdge {
+                    target_field: "body".to_string(),
+                    expression: "return '{{process.env.HOME}}';".to_string(),
+                    ..wire("e1", "a", "b")
+                },
+                FlowEdge {
+                    target_field: "headers[X-H].value".to_string(),
+                    expression: "return '{{process.env.HOME}}';".to_string(),
+                    ..wire("e2", "c", "b")
+                },
+            ],
+            callback_host: None,
+        };
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor)
+            .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service.run(&exec, run_input("wired")).await.expect("run");
+
+        assert_eq!(withheld_logs(step_of(&summary, "b")), 1);
     }
 
     #[tokio::test]

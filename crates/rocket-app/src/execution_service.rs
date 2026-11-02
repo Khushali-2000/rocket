@@ -1515,6 +1515,23 @@ impl RequestExecutionService {
         scopes.flatten_with_process_env()
     }
 
+    /// The variable scopes of a flow node, before nested names are filled.
+    pub(crate) fn flow_variable_scopes(
+        &self,
+        global_env_name: Option<&str>,
+        collection: Option<&str>,
+        environment_name: Option<&str>,
+        external_secrets: &std::collections::HashMap<String, String>,
+    ) -> VariableContext {
+        self.build_variable_scopes(
+            global_env_name,
+            collection,
+            environment_name,
+            None,
+            external_secrets,
+        )
+    }
+
     /// `build_variable_context` with `process_env` as `process.env.NAME`. The caller read
     /// the gate already, so this reads no file and decides nothing.
     pub(crate) fn variable_context_with_process_env(

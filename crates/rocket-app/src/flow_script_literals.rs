@@ -1,11 +1,23 @@
 //! Resolves `{{name}}` placeholders inside string literals of flow script source.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 /// Replaces `{{name}}` inside string literals with the escaped var value.
+#[cfg(test)]
 pub(crate) fn resolve_script_literals(source: &str, vars: &HashMap<String, String>) -> String {
+    resolve_script_literals_with(source, &mut |name| vars.get(name).cloned())
+}
+
+/// Like `resolve_script_literals`, with the values answered by `lookup`.
+///
+/// Every value `lookup` returns is escaped here and is never scanned again.
+pub(crate) fn resolve_script_literals_with(
+    source: &str,
+    lookup: &mut dyn FnMut(&str) -> Option<String>,
+) -> String {
     scan(source, &mut |name| {
-        vars.get(name).map(|value| escape_value(value))
+        lookup(name).map(|value| escape_value(&value))
     })
 }
 
@@ -166,6 +178,22 @@ pub(crate) fn escape_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_closure_resolves_names() {
+        let out = resolve_script_literals_with("return 'a={{a}}';", &mut |name| {
+            (name == "a").then(|| "x'y".to_string())
+        });
+        assert_eq!(out, "return 'a=x\\'y';");
+    }
+
+    #[test]
+    fn dynamic_name_comes_from_the_closure() {
+        let out = resolve_script_literals_with("return '{{$guid}}';", &mut |name| {
+            name.strip_prefix('$').map(|n| format!("dyn-{n}"))
+        });
+        assert_eq!(out, "return 'dyn-guid';");
+    }
 
     fn vars() -> HashMap<String, String> {
         let mut m = HashMap::new();
