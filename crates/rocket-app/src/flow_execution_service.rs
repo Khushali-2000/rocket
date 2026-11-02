@@ -1201,17 +1201,15 @@ impl FlowExecutionService {
         let saved = self.saved_requests(&input.collection, &flow);
         // Plain scope values only: no RocketVault and no `process.env`, so a change
         // to those does not invalidate a cached run.
-        let plain_vars = crate::execution_service::expanded_send(
-            &exec.flow_variable_scopes(
+        // Raw values: a `$` name inside a value would expand to a new value each run.
+        let plain_vars = exec
+            .flow_variable_scopes(
                 input.global_env_name.as_deref(),
                 Some(&input.collection),
                 input.environment_name.as_deref(),
                 &HashMap::new(),
-            ),
-            &HashMap::new(),
-            &mut HashMap::new(),
-        )
-        .values;
+            )
+            .flatten();
         let fingerprints = crate::flow_run_cache::fingerprints(
             &flow,
             &order,

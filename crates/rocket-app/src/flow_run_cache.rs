@@ -455,8 +455,10 @@ pub(crate) fn saved_request_text(request: &Request) -> String {
 ///
 /// A Transform script, an Input value and an edge expression that contain
 /// `{{` also hash `resolved(text)`, so a changed plain variable changes the
-/// fingerprint. Request nodes do not (decision D5). The resolved text is
-/// never kept, only its hash.
+/// fingerprint. A Request node's own url, headers and body do not (decision
+/// D5). The edge expressions into a Request node do, because the runtime
+/// resolves them: this is a deliberate exception to D5 for edge scripts only.
+/// The resolved text is never kept, only its hash.
 pub(crate) fn fingerprints(
     flow: &Flow,
     order: &[String],
@@ -516,14 +518,30 @@ pub(crate) fn fingerprints(
     out
 }
 
+/// How deep `plain_placeholder_hash` follows a value that names another variable.
+const MAX_PLACEHOLDER_DEPTH: usize = 8;
+
 /// A one-way hash of the plain values a text names with `{{name}}`.
 ///
-/// Each name, in order, is hashed with its value from `vars`, or with nothing
-/// when `vars` has none. Dynamic `$` names are skipped, so the hash is stable.
-/// The caller passes plain scope values only: RocketVault and `process.env`
-/// values are not in `vars`, so a change to them goes unseen.
+/// Each name, in order, is hashed with its raw value from `vars`, or with
+/// nothing when `vars` has none. A value that names other variables is
+/// followed, to a depth limit and once per name, so a cycle ends. Dynamic `$`
+/// names are skipped, so the hash is stable. The caller passes plain scope
+/// values only: RocketVault and `process.env` values are not in `vars`, so a
+/// change to them goes unseen.
 pub(crate) fn plain_placeholder_hash(text: &str, vars: &HashMap<String, String>) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
+    hash_placeholders(text, vars, &mut hasher, 0, &mut HashSet::new());
+    Some(hasher.finish())
+}
+
+fn hash_placeholders(
+    text: &str,
+    vars: &HashMap<String, String>,
+    hasher: &mut DefaultHasher,
+    depth: usize,
+    seen: &mut HashSet<String>,
+) {
     let mut rest = text;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
@@ -531,12 +549,18 @@ pub(crate) fn plain_placeholder_hash(text: &str, vars: &HashMap<String, String>)
             break;
         };
         let name = after[..end].trim();
-        if !name.starts_with('$') {
-            (name, vars.get(name)).hash(&mut hasher);
-        }
         rest = &after[end + 2..];
+        if name.starts_with('$') {
+            continue;
+        }
+        let value = vars.get(name);
+        (name, value).hash(hasher);
+        if let Some(value) = value {
+            if depth < MAX_PLACEHOLDER_DEPTH && seen.insert(name.to_string()) {
+                hash_placeholders(value, vars, hasher, depth + 1, seen);
+            }
+        }
     }
-    Some(hasher.finish())
 }
 
 /// The external-secrets key under which a partial run masks a value from an
@@ -866,6 +890,53 @@ mod tests {
         assert_eq!(hash("{{ x }}", "1"), hash("{{x}}", "1"));
         assert_eq!(hash("{{$guid}}", "1"), hash("{{$guid}}", "2"));
         assert_ne!(hash("{{y}}", "1"), hash("{{x}}", "1"));
+    }
+
+    #[test]
+    fn a_request_node_follows_a_resolved_edge_expression() {
+        let (mut flow, order) = chain(&["a", "b"]);
+        set_url(&mut flow, "b", "https://api.example.com/{{x}}");
+        flow.edges[0].expression = "response.body + '{{x}}'".to_string();
+        let one = fingerprints(&flow, &order, &|_| None, &|_| Some(1));
+        let two = fingerprints(&flow, &order, &|_| None, &|_| Some(2));
+        assert_ne!(one["b"], two["b"]);
+        // Without the edge placeholder, the request's own `{{x}}` is ignored.
+        flow.edges[0].expression = "response.body".to_string();
+        let one = fingerprints(&flow, &order, &|_| None, &|_| Some(1));
+        let two = fingerprints(&flow, &order, &|_| None, &|_| Some(2));
+        assert_eq!(one["b"], two["b"]);
+    }
+
+    #[test]
+    fn a_changed_nested_variable_changes_the_hash() {
+        let vars = |b: &str| {
+            HashMap::from([
+                ("A".to_string(), "{{B}}".to_string()),
+                ("B".to_string(), b.to_string()),
+            ])
+        };
+        assert_ne!(
+            plain_placeholder_hash("{{A}}", &vars("1")),
+            plain_placeholder_hash("{{A}}", &vars("2"))
+        );
+    }
+
+    #[test]
+    fn a_dynamic_name_inside_a_value_keeps_the_hash_stable() {
+        let vars = HashMap::from([("A".to_string(), "id-{{$guid}}".to_string())]);
+        assert_eq!(
+            plain_placeholder_hash("{{A}}", &vars),
+            plain_placeholder_hash("{{A}}", &vars)
+        );
+    }
+
+    #[test]
+    fn a_cyclic_pair_of_variables_ends() {
+        let vars = HashMap::from([
+            ("A".to_string(), "{{B}}".to_string()),
+            ("B".to_string(), "{{A}}".to_string()),
+        ]);
+        assert!(plain_placeholder_hash("{{A}}", &vars).is_some());
     }
 
     #[test]

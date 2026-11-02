@@ -942,3 +942,21 @@ async fn a_script_node_is_reused_until_a_plain_variable_it_uses_changes() {
     assert_eq!(node_ids(&rerun), vec!["in", "t"]);
     assert_eq!(step(&rerun, "t").status, FlowNodeStatus::Success);
 }
+
+#[tokio::test]
+async fn a_variable_with_a_dynamic_name_does_not_stop_a_script_from_being_reused() {
+    let h = harness(script_flow());
+    let exec = exec_for(&h.http, collection_with_k("id-{{$guid}}"));
+    let base = h.service.run(&exec, input()).await.expect("base run");
+    let reused = h
+        .service
+        .run_partial(
+            &exec,
+            input(),
+            FlowAuthTokens::new(),
+            partial(&base.run_id, "out", FlowPartialMode::Node),
+        )
+        .await
+        .expect("a dynamic name must not change the fingerprint");
+    assert_eq!(node_ids(&reused), vec!["out"]);
+}
