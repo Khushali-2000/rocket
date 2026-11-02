@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="Rocket is a fast, native desktop API client for HTTP, GraphQL, gRPC and WebSocket — file-based git-native collections, a visual Flow workflow builder, and a built-in AI assistant. No cloud, no account, half the memory of Electron-based alternatives."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Rocket — The native API client for people who ship" />
+    <meta
+      property="og:description"
+      content="146 MB installed, ~262 MB idle, no account. HTTP, GraphQL, gRPC and WebSocket in file-based collections with real git, a visual Flow builder, and an AI assistant that proposes changes instead of making them."
+    />
+    <meta property="og:image" content="/rocket.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>Rocket — The native API client for people who ship</title>
+    <script>
+      // Settle the theme before the first paint, so there is no flash of the wrong palette.
+      // ThemeToggle writes the same key.
+      try {
+        var stored = localStorage.getItem('rocket-theme');
+        var dark = stored
+          ? stored === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.classList.toggle('dark', dark);
+      } catch (error) {
+        /* Storage can be blocked. The light palette is a fine default. */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
