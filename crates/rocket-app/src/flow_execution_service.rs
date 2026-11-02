@@ -1736,11 +1736,19 @@ impl FlowExecutionService {
                     Ok(output) => output,
                     Err(e) => return Err(fail_wire(trace, edge, e, &trace_masks)),
                 };
+                let expression = resolve_script_source(
+                    exec,
+                    input,
+                    ctx,
+                    external_secrets,
+                    logs,
+                    &edge.expression,
+                );
                 let outcome = exec
                     .resolve_flow_wire_expression(
                         &input.collection,
                         source_output,
-                        &edge.expression,
+                        &expression,
                         &secret_values,
                     )
                     .await;
@@ -1811,11 +1819,19 @@ impl FlowExecutionService {
                         Ok(output) => output,
                         Err(e) => return Err(fail_wire(trace, edge, e, &trace_masks)),
                     };
+                    let expression = resolve_script_source(
+                        exec,
+                        input,
+                        ctx,
+                        external_secrets,
+                        logs,
+                        &edge.expression,
+                    );
                     let outcome = exec
                         .resolve_flow_wire_expression(
                             &input.collection,
                             source_output,
-                            &edge.expression,
+                            &expression,
                             &secret_values,
                         )
                         .await;
@@ -2030,11 +2046,13 @@ impl FlowExecutionService {
             FlowNodeKind::Transform { script, .. } => {
                 let source = single_input(node, data_edges, captured, trace, &trace_masks)?;
                 record_input_wire(trace, data_edges, source, &trace_masks);
+                let script_text =
+                    resolve_script_source(exec, input, ctx, external_secrets, logs, script);
                 let outcome = exec
                     .evaluate_flow_transform_value(
                         &input.collection,
                         source,
-                        script,
+                        &script_text,
                         &secret_values,
                     )
                     .await;
@@ -2220,6 +2238,41 @@ fn record_input_wire(
             wire.expression_hash = None;
         }
     }
+}
+
+/// Fills `{{name}}` placeholders written inside string literals of a wire or
+/// Transform script, with the scope the Input node uses. A source without `{{`
+/// is returned as it is, and no scope is built.
+fn resolve_script_source(
+    exec: &RequestExecutionService,
+    input: &RunFlowInput,
+    ctx: &NodeRunContext,
+    external_secrets: &HashMap<String, String>,
+    logs: &mut Vec<FlowLogEntry>,
+    source: &str,
+) -> String {
+    if !source.contains("{{") {
+        return source.to_string();
+    }
+    // The host map is copied only for a source that names `process.env`.
+    let names_process_env = crate::flow_script_literals::script_names_process_env(source);
+    let no_process_env = HashMap::new();
+    let vars = exec.variable_context_with_process_env(
+        input.global_env_name.as_deref(),
+        Some(&input.collection),
+        input.environment_name.as_deref(),
+        None,
+        external_secrets,
+        if names_process_env {
+            &ctx.process_env.vars
+        } else {
+            &no_process_env
+        },
+    );
+    if !ctx.process_env.allowed && names_process_env {
+        logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
+    }
+    crate::flow_script_literals::resolve_script_literals(source, &vars)
 }
 
 /// Marks `edge` as failed in the trace and returns its error, named after
@@ -10975,6 +11028,144 @@ mod tests {
             .find(|h| h.key == "X-Wired")
             .map(|h| h.value.clone());
         assert_eq!(wired.as_deref(), Some(attack));
+    }
+
+    /// `a -> b`, with `expression` on a body wire. `a` answers `a_body`.
+    async fn run_body_wire(
+        exec: &RequestExecutionService,
+        executor: &Arc<RecordingExecutor>,
+        expression: &str,
+        a_body: &str,
+    ) -> FlowRunSummary {
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                request_flow_node("a", "https://api.example.com/a"),
+                request_flow_node("b", "https://api.example.com/b"),
+            ],
+            edges: vec![FlowEdge {
+                target_field: "body".to_string(),
+                expression: expression.to_string(),
+                ..wire("e1", "a", "b")
+            }],
+            callback_host: None,
+        };
+        executor.set_body("api.example.com/a", a_body);
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+        service.run(exec, run_input("wired")).await.expect("run")
+    }
+
+    #[tokio::test]
+    async fn a_wire_script_resolves_placeholders_in_its_own_source() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+
+        run_body_wire(
+            &exec,
+            &executor,
+            "return JSON.stringify({u: '{{apiKey}}'});",
+            "ignored",
+        )
+        .await;
+
+        let sent = executor.sent_bodies()[1].clone().unwrap_or_default();
+        assert!(sent.contains("k-123"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_transform_script_resolves_placeholders_in_its_own_source() {
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                input_node_with("in", "x"),
+                transform_node("t", "return '{{apiKey}}';"),
+                allow_wired_host(request_flow_node("b", "https://api.example.com/b")),
+            ],
+            edges: vec![
+                input_edge("e1", "in", "t"),
+                FlowEdge {
+                    target_field: "headers[X-T].value".to_string(),
+                    ..wire("e2", "t", "b")
+                },
+            ],
+            callback_host: None,
+        };
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+
+        service.run(&exec, run_input("wired")).await.expect("run");
+
+        let header = executor.sent_headers()[0]
+            .iter()
+            .find(|h| h.key == "X-T")
+            .map(|h| h.value.clone());
+        assert_eq!(header.as_deref(), Some("k-123"));
+    }
+
+    #[tokio::test]
+    async fn response_text_through_a_script_stays_literal() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+
+        run_body_wire(&exec, &executor, "response.body", "{{apiKey}}").await;
+
+        assert_eq!(executor.sent_bodies()[1].as_deref(), Some("{{apiKey}}"));
+    }
+
+    #[tokio::test]
+    async fn a_script_cannot_pull_a_placeholder_out_of_response_data() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor);
+
+        run_body_wire(&exec, &executor, "return '{{' + 'apiKey' + '}}';", "x").await;
+
+        assert_eq!(executor.sent_bodies()[1].as_deref(), Some("{{apiKey}}"));
+    }
+
+    #[tokio::test]
+    async fn a_logged_resolved_secret_is_masked() {
+        let mut collection = rocket_collection::Collection::new("my-api");
+        // The value is long enough to be masked.
+        let mut var = collection_var("apiKey", "k-secret-123456");
+        var.secret = true;
+        collection.settings.variables.push(var);
+        let executor = RecordingExecutor::new();
+        let exec = exec_with_collection(&executor, collection);
+
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "console.log('{{apiKey}}'); return 'x';",
+            "x",
+        )
+        .await;
+
+        let shown = format!("{:?}", summary.steps);
+        assert!(!shown.contains("k-secret-123456"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_withheld_process_env_name_adds_one_warning() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_var_exec(&executor)
+            .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+
+        let summary = run_body_wire(&exec, &executor, "return '{{process.env.HOME}}';", "x").await;
+
+        assert_eq!(withheld_logs(step_of(&summary, "b")), 1);
+        assert_eq!(
+            executor.sent_bodies()[1].as_deref(),
+            Some("{{process.env.HOME}}")
+        );
     }
 
     #[tokio::test]
