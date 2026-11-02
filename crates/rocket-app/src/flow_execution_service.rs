@@ -483,6 +483,19 @@ pub(crate) fn to_flow_logs(entries: Vec<ConsoleEntry>) -> Vec<FlowLogEntry> {
         .collect()
 }
 
+/// `to_flow_logs` with every message masked by `masks`. A Request's own send masks only its
+/// own secrets, so a host value an earlier node used must be masked here.
+pub(crate) fn masked_flow_logs(
+    entries: Vec<ConsoleEntry>,
+    masks: &HashSet<String>,
+) -> Vec<FlowLogEntry> {
+    let mut logs = to_flow_logs(entries);
+    for log in &mut logs {
+        log.message = crate::redaction::redact_secrets(&log.message, masks);
+    }
+    logs
+}
+
 /// Builds an `ExecuteRequestInput` for a `FlowNodeKind::Request` node, before
 /// any wire overrides (see `apply_wired_overrides`) are applied.
 ///
@@ -1220,8 +1233,9 @@ impl FlowExecutionService {
             },
             &|text| crate::flow_run_cache::plain_placeholder_hash(text, &plain_vars),
         );
-        // A partial run is checked before any secret is fetched or event sent,
-        // so a refusal costs nothing and leaves no trace.
+        // A partial run is checked before any secret is fetched or event sent, so
+        // a refusal sends no event. Planning above already read the variable
+        // scopes, including the OS keychain for secret variables.
         let prepared = match &partial {
             Some(p) => {
                 Some(self.prepare_partial(&input, &flow, &order, &saved, &fingerprints, p)?)
@@ -2035,7 +2049,10 @@ impl FlowExecutionService {
                     *exchange = Some(cap_exchange(record));
                 }
                 let output = result?;
-                logs.extend(to_flow_logs(output.console_entries.clone()));
+                logs.extend(masked_flow_logs(
+                    output.console_entries.clone(),
+                    secret_values,
+                ));
                 Ok(
                     ExecutedNode::plain(CapturedOutput::Request(Box::new(output)))
                         .with_sent_secret(sent_value),
@@ -11435,6 +11452,117 @@ mod tests {
             "{:?}",
             out.value
         );
+    }
+
+    /// `i(text) -> r`, the Input wired into the saved request's body. The request's
+    /// post-response script logs the body it sent.
+    async fn run_input_into_logging_request(
+        exec: &RequestExecutionService,
+        text: &str,
+        poll: bool,
+    ) -> FlowRunSummary {
+        let mut r = saved_flow_node("r", "req.yml");
+        if let FlowNodeKind::Request { repeat_until, .. } = &mut r.kind {
+            if poll {
+                *repeat_until = Some(rocket_flow::RepeatUntil {
+                    condition: "true".to_string(),
+                    interval_ms: 100,
+                    max_attempts: 1,
+                    timeout_ms: 1000,
+                });
+            }
+        }
+        let flow = Flow {
+            name: "host-log".to_string(),
+            nodes: vec![input_node_with("i", text), r],
+            edges: vec![edge_from(
+                "e1",
+                "i",
+                handle::RESULT,
+                "r",
+                "body",
+                "response.body",
+            )],
+            callback_host: None,
+        };
+        let mut saved = Request::new("Post", HttpMethod::Post, "https://api.example.com/x");
+        saved.post_response_script = Some("console.log('B=' + req.getBody());".into());
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(
+                FakeCollectionRepo::new()
+                    .with_request("my-api", "req.yml", saved)
+                    .build(),
+            ),
+            Box::new(NullEventPublisher),
+        );
+        let input = RunFlowInput {
+            environment_name: Some("dev".to_string()),
+            ..run_input("host-log")
+        };
+        service.run(exec, input).await.expect("run")
+    }
+
+    #[tokio::test]
+    async fn a_request_script_console_masks_a_host_value_an_input_used() {
+        for poll in [false, true] {
+            let executor = RecordingExecutor::new();
+            let exec = host_env_exec(&executor);
+            let os_path = std::env::var("PATH").expect("PATH is set");
+
+            let summary = run_input_into_logging_request(&exec, "{{process.env.PATH}}", poll).await;
+
+            let step = step_of(&summary, "r");
+            assert!(
+                step.logs.iter().any(|l| l.message.starts_with("B=")),
+                "poll={poll} {:?}",
+                step.logs
+            );
+            let json = serde_json::to_string(&summary).expect("json");
+            assert!(!json.contains(&os_path), "poll={poll} {json}");
+            assert!(!logs_and_traces(&summary).contains(&os_path), "poll={poll}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partial_run_keeps_masking_a_host_value_the_base_run_used() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let os_path = std::env::var("PATH").expect("PATH is set");
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow(
+                "my-api",
+                input_transform_output_flow("{{process.env.PATH}}"),
+            )),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+        let input = RunFlowInput {
+            environment_name: Some("dev".to_string()),
+            ..run_input("in")
+        };
+        let base = service.run(&exec, input.clone()).await.expect("base run");
+
+        let summary = service
+            .run_partial(
+                &exec,
+                input,
+                FlowAuthTokens::new(),
+                crate::flow_partial::PartialRun {
+                    base_run_id: base.run_id.clone(),
+                    start_node_id: "out".to_string(),
+                    mode: rocket_shared::events::FlowPartialMode::Node,
+                },
+            )
+            .await
+            .expect("partial run");
+
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains(&os_path), "{json}");
+        assert!(step_of(&summary, "out")
+            .value
+            .as_deref()
+            .is_some_and(|v| v.contains(crate::redaction::REDACTED)));
     }
 
     #[tokio::test]

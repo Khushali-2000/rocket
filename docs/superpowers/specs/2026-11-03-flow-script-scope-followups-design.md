@@ -1,6 +1,6 @@
 # Flow script scope follow-ups
 
-Date: 2026-11-03. Status: draft, waiting for review.
+Date: 2026-11-03. Status: implemented.
 Builds on: `2026-11-02-flow-script-source-placeholders-design.md` (branch `feat/flow-script-source-placeholders`).
 
 ## Problem
@@ -49,7 +49,7 @@ A struct built lazily once per node in `execute_node`:
 
 ### Run cache (item 4)
 
-In `flow_run_cache.rs`, `fingerprints` takes a closure that returns a one-way hash of the resolved text for a script or Input node whose source contains `{{`. The hash covers plain scope values only. The resolved text is never stored. Request nodes are unchanged (decision D5). Docs say a changed RocketVault or `process.env` value does not invalidate a cached run.
+In `flow_run_cache.rs`, `fingerprints` takes a closure that returns a one-way hash of the resolved text for a script or Input node whose source contains `{{`. The hash covers plain scope values only. The resolved text is never stored. Request nodes are unchanged (decision D5), with one exception: the edge scripts into a Request node follow the resolved hash, because the runtime resolves them. The Request's own url, body and headers do not. Docs say a changed RocketVault or `process.env` value does not invalidate a cached run.
 
 ## Security reasoning
 

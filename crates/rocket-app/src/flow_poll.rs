@@ -10,8 +10,7 @@ use rocket_shared::events::{FlowDebugRequest, FlowLiveProgress, FlowLogEntry, Fl
 use crate::execution_service::{ExecuteRequestInput, RequestExecutionService};
 use crate::flow_debug::{build_debug_request, cap_exchange, sent_masks};
 use crate::flow_execution_service::{
-    to_flow_logs, CapturedOutput, ExecutedNode, FlowCoercion, FlowExecutionService, NodeRunContext,
-    RunFlowInput,
+    CapturedOutput, ExecutedNode, FlowCoercion, FlowExecutionService, NodeRunContext, RunFlowInput,
 };
 use crate::flow_trace::NodeTrace;
 
@@ -145,7 +144,10 @@ impl FlowExecutionService {
                 }
             };
             let status_code = output.response.status;
-            logs.extend(to_flow_logs(output.console_entries.clone()));
+            logs.extend(crate::flow_execution_service::masked_flow_logs(
+                output.console_entries.clone(),
+                secret_values,
+            ));
             let history = output.deferred_history.take();
             let captured = CapturedOutput::Request(Box::new(output));
 

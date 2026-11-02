@@ -147,20 +147,21 @@ outputs are never cached. A run is refused before any event when the base
 run is gone, used other environments, a node upstream changed (Merkle
 fingerprints, saved request text without `uid`), a needed input was skipped,
 failed or not kept, a seed is stale after an earlier partial run, or a Wait's
-callback sender is outside the run. A Transform script, an Input value and
-an edge expression that contain `{{` also hash the plain values they name
+callback sender is outside the run. A Transform script, an Input value and an
+edge expression that contain `{{` also hash the plain values they name
 (global, collection and environment variables, nested names followed, `$`
-names skipped; see `plain_placeholder_hash`), so a changed plain variable counts as an edit of
-that node. The resolved text is never stored, only hashed. A changed
-RocketVault or `process.env` value does not invalidate a cached run. Request
-nodes ignore variable changes in their own url, headers and body (decision
-D5), but the edge expressions into a Request node are hashed too, because the
-runtime resolves them (a deliberate exception for edge scripts only). Not detected: Request node
-variable value changes, folder and collection settings a saved request inherits,
-shared `.js` script files, and auth tokens supplied for the partial run (they
-are not compared with the base run's). Values the base run masked are masked
-again under `}}prev-run.<n>` external-secret keys. No `{{template}}` can
-reference them, but a script can read one by exact name (`rok.getSecretVar`).
+names skipped; see `plain_placeholder_hash`), so a changed plain variable
+counts as an edit of that node. The resolved text is never stored, only
+hashed. A changed RocketVault or `process.env` value does not invalidate a
+cached run. Request nodes ignore variable changes in their own url, headers
+and body (decision D5), but the edge expressions into a Request node are
+hashed too, because the runtime resolves them (a deliberate exception for edge
+scripts only). Not detected: Request node variable value changes, folder and
+collection settings a saved request inherits, shared `.js` script files, and
+auth tokens supplied for the partial run (they are not compared with the base
+run's). Values the base run masked are masked again under `}}prev-run.<n>`
+external-secret keys. No `{{template}}` can reference them, but a script can
+read one by exact name (`rok.getSecretVar`).
 
 ## Flow run ids (`flow_run_id.rs`)
 
