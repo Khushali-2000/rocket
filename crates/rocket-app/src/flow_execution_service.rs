@@ -817,6 +817,34 @@ pub(crate) struct NodeRunContext {
     pub(crate) process_env: Arc<ProcessEnv>,
     /// The `.env` values of `process_env` long enough to mask.
     pub(crate) dot_env_values: Arc<HashSet<String>>,
+    /// The host `process.env` values any node used so far, with their escaped forms. Later
+    /// nodes mask them, because a wire carries the raw value.
+    pub(crate) used_host_values: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl NodeRunContext {
+    /// Records host values a node used, with their escaped forms.
+    fn record_used_host_values(&self, values: impl IntoIterator<Item = String>) {
+        let mut added: HashSet<String> = values.into_iter().collect();
+        if added.is_empty() {
+            return;
+        }
+        add_escaped_forms(&mut added);
+        // A poisoned lock still holds a usable set, so masking carries on.
+        let mut guard = self
+            .used_host_values
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.extend(added);
+    }
+
+    /// The host values used so far.
+    fn used_host_values(&self) -> HashSet<String> {
+        self.used_host_values
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 /// The values of `process_env.dot_env_keys` that are long enough to mask.
@@ -1199,6 +1227,7 @@ impl FlowExecutionService {
             input.global_env_name.as_deref(),
         ));
         let run_dot_env_values = Arc::new(dot_env_mask_values(&run_process_env));
+        let run_used_host_values: Arc<std::sync::Mutex<HashSet<String>>> = Default::default();
         // Resolve every Auth node before anything is announced, so a run that
         // cannot authenticate fails with no events, like a callback that
         // cannot open. Every credential secret joins `external_secrets`, so the
@@ -1366,6 +1395,7 @@ impl FlowExecutionService {
                         cancel: cancel_signal.clone(),
                         process_env: Arc::clone(&run_process_env),
                         dot_env_values: Arc::clone(&run_dot_env_values),
+                        used_host_values: Arc::clone(&run_used_host_values),
                     };
                     let started_at = std::time::Instant::now();
                     let result = match node_opt {
@@ -1475,6 +1505,13 @@ impl FlowExecutionService {
         masking_secrets.extend(credentials.secret_forms());
         masking_secrets.extend(run_dot_env_values.iter().cloned());
         masking_secrets.extend(sent_secrets);
+        masking_secrets.extend(
+            run_used_host_values
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .cloned(),
+        );
         add_escaped_forms(&mut masking_secrets);
         outcomes.retain(|id, _| !seeded.contains(id));
         captured.retain(|id, _| !seeded.contains(id));
@@ -1693,6 +1730,8 @@ impl FlowExecutionService {
         // A script source holds the escaped form of a value, and JSON.stringify holds the JSON
         // form, so those forms are masked too.
         add_escaped_forms(&mut secret_values);
+        // Host values an earlier node used travel raw over a wire, so this node masks them.
+        secret_values.extend(ctx.used_host_values());
         // Trace values are masked like an Output value: every secret variable
         // and every form of every Auth-node credential. The Request arm
         // rebinds `secret_values` later, so this set is built first.
@@ -1728,8 +1767,8 @@ impl FlowExecutionService {
                 // A host value the text named is masked in the step, like a `.env` value.
                 if names_process_env && ctx.process_env.allowed {
                     let used = used_process_env_values(value.data(), &ctx.process_env);
-                    trace_masks.extend(used);
-                    add_escaped_forms(&mut trace_masks);
+                    ctx.record_used_host_values(used);
+                    trace_masks.extend(ctx.used_host_values());
                 }
                 // Wires get the raw value. The step shows it masked, then capped.
                 let (reported, cut) = mask_then_cap(&resolved, &trace_masks, STEP_VALUE_LIMIT);
@@ -1927,6 +1966,7 @@ impl FlowExecutionService {
                         );
                         values.extend(ctx.dot_env_values.iter().cloned());
                         values.extend(script_scope.extra_masks().iter().cloned());
+                        values.extend(ctx.used_host_values());
                         add_escaped_forms(&mut values);
                         request_secret_values = std::borrow::Cow::Owned(values);
                         request_secrets = std::borrow::Cow::Owned(secrets);
@@ -2387,6 +2427,7 @@ impl ScriptScope {
                 }
             },
         );
+        ctx.record_used_host_values(used_env.iter().cloned());
         self.add_masks(used_env);
         resolved
     }
@@ -4884,6 +4925,7 @@ mod tests {
             cancel,
             process_env: Default::default(),
             dot_env_values: Default::default(),
+            used_host_values: Default::default(),
         };
 
         service.publish_progress(&ctx, Some(3), Some(30), "attempt 3/30".to_string());
@@ -10845,10 +10887,10 @@ mod tests {
 
         let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
 
-        let path = std::env::var("PATH").expect("PATH is set");
+        // The host value was used, so every step shows it masked.
         assert_eq!(
             step_of(&summary, "out").value.as_deref(),
-            Some(path.as_str())
+            Some(crate::redaction::REDACTED)
         );
     }
 
@@ -11291,14 +11333,106 @@ mod tests {
         );
     }
 
-    /// Every log and trace text of the run, without the request bodies a wire value feeds.
+    /// Every log, trace and value text of the run as raw strings, so a leak cannot hide in
+    /// Debug escaping. The request bodies a wire value feeds are not part of it.
     fn logs_and_traces(summary: &FlowRunSummary) -> String {
-        summary
-            .steps
-            .iter()
-            .map(|s| format!("{:?}|{:?}|{:?}", s.logs, s.trace, s.value))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut parts: Vec<String> = Vec::new();
+        for s in &summary.steps {
+            parts.extend(s.logs.iter().map(|l| l.message.clone()));
+            parts.extend(s.value.clone());
+            parts.extend(s.error.clone());
+            if let Some(trace) = &s.trace {
+                parts.extend(trace.wires.iter().filter_map(|w| w.value.clone()));
+            }
+        }
+        parts.join("\n")
+    }
+
+    /// `i(text) -> t(script) -> out`, with `t` returning its input.
+    fn input_transform_output_flow(text: &str) -> Flow {
+        Flow {
+            name: "in".to_string(),
+            nodes: vec![
+                input_node_with("i", text),
+                transform_node("t", "return response.body;"),
+                output_node_named("out"),
+            ],
+            edges: vec![
+                input_edge("e1", "i", "t"),
+                edge_from("e2", "t", handle::RESULT, "out", "value", "response.body"),
+            ],
+            callback_host: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_used_host_value_is_masked_in_a_downstream_output() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let os_path = std::env::var("PATH").expect("PATH is set");
+
+        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+
+        let shown = logs_and_traces(&summary);
+        assert!(!shown.contains(&os_path), "{shown}");
+        let out = step_of(&summary, "out");
+        assert!(
+            out.value
+                .as_deref()
+                .is_some_and(|v| v.contains(crate::redaction::REDACTED)),
+            "{:?}",
+            out.value
+        );
+        let wire = out
+            .trace
+            .as_ref()
+            .and_then(|t| t.wires.first())
+            .expect("wire");
+        assert!(
+            wire.value
+                .as_deref()
+                .is_some_and(|v| v.contains(crate::redaction::REDACTED)),
+            "{:?}",
+            wire.value
+        );
+        let events = serde_json::to_string(&summary).expect("json");
+        assert!(!events.contains(&os_path));
+    }
+
+    #[tokio::test]
+    async fn a_used_host_value_is_masked_through_a_transform() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let os_path = std::env::var("PATH").expect("PATH is set");
+
+        let summary =
+            run_dev_flow(input_transform_output_flow("{{process.env.PATH}}"), &exec).await;
+
+        let shown = logs_and_traces(&summary);
+        assert!(!shown.contains(&os_path), "{shown}");
+        assert!(shown.contains(crate::redaction::REDACTED), "{shown}");
+        let out = step_of(&summary, "out");
+        assert!(
+            out.value
+                .as_deref()
+                .is_some_and(|v| v.contains(crate::redaction::REDACTED)),
+            "{:?}",
+            out.value
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_no_node_used_stays_visible_downstream() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let home = std::env::var("HOME").expect("HOME is set");
+
+        let summary = run_dev_flow(input_to_output_flow(&format!("at {home}")), &exec).await;
+
+        assert_eq!(
+            step_of(&summary, "out").value.as_deref(),
+            Some(format!("at {home}").as_str())
+        );
     }
 
     #[tokio::test]
@@ -13103,6 +13237,7 @@ mod tests {
             cancel,
             process_env: Default::default(),
             dot_env_values: Default::default(),
+            used_host_values: Default::default(),
         };
         let mut trace = NodeTrace::default();
         let result = service
