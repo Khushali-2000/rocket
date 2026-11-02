@@ -47,6 +47,19 @@ pub(crate) fn redact_error(
     }
 }
 
+/// The JSON string content of `value`, without the outer quotes.
+///
+/// It is `None` when the JSON form equals the input.
+pub(crate) fn json_escaped_form(value: &str) -> Option<String> {
+    let quoted = serde_json::to_string(value).ok()?;
+    // Only the outer quotes go, so a value ending in a quote keeps its escaped quote.
+    let escaped = quoted
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(&quoted);
+    (escaped != value).then(|| escaped.to_string())
+}
+
 /// Every form of a secret value that must be masked.
 ///
 /// The whole value, its trimmed form, and, for a multi-line value such as a PEM, each line on its
@@ -160,6 +173,21 @@ mod tests {
 
     fn set(values: &[&str]) -> HashSet<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn json_escaped_form_covers_quotes_backslashes_and_controls() {
+        assert_eq!(
+            json_escaped_form("pa\"ss\\word\n\u{1}").as_deref(),
+            Some("pa\\\"ss\\\\word\\n\\u0001")
+        );
+        // A value ending in a quote keeps its escaped quote.
+        assert_eq!(json_escaped_form("abc\"").as_deref(), Some("abc\\\""));
+    }
+
+    #[test]
+    fn json_escaped_form_is_none_for_plain_text() {
+        assert_eq!(json_escaped_form("plain-secret-1"), None);
     }
 
     #[test]

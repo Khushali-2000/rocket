@@ -188,6 +188,17 @@ mod tests {
     }
 
     #[test]
+    fn a_looked_up_value_is_not_scanned_again() {
+        let mut looked_up: Vec<String> = Vec::new();
+        let out = resolve_script_literals_with("return '{{a}}';", &mut |name| {
+            looked_up.push(name.to_string());
+            (name == "a").then(|| "{{b}}".to_string())
+        });
+        assert_eq!(out, "return '{{b}}';");
+        assert_eq!(looked_up, vec!["a".to_string()]);
+    }
+
+    #[test]
     fn dynamic_name_comes_from_the_closure() {
         let out = resolve_script_literals_with("return '{{$guid}}';", &mut |name| {
             name.strip_prefix('$').map(|n| format!("dyn-{n}"))

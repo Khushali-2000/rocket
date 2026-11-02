@@ -830,6 +830,18 @@ pub(crate) fn dot_env_mask_values(process_env: &ProcessEnv) -> HashSet<String> {
         .collect()
 }
 
+/// The long enough host values of the `{{process.env.NAME}}` names in `text`.
+fn used_process_env_values(text: &str, process_env: &ProcessEnv) -> HashSet<String> {
+    rocket_environment::resolve(text, &HashMap::new())
+        .unresolved
+        .iter()
+        .filter_map(|name| name.trim().strip_prefix("process.env."))
+        .filter_map(|key| process_env.vars.get(key))
+        .filter(|v| v.len() >= MIN_REDACTION_LEN)
+        .cloned()
+        .collect()
+}
+
 /// Registers a run as in flight and removes every trace of it when dropped,
 /// so no exit path of `run` can leak the run id or its cancel handle.
 struct RunRegistration<'a> {
@@ -1463,6 +1475,7 @@ impl FlowExecutionService {
         masking_secrets.extend(credentials.secret_forms());
         masking_secrets.extend(run_dot_env_values.iter().cloned());
         masking_secrets.extend(sent_secrets);
+        add_escaped_forms(&mut masking_secrets);
         outcomes.retain(|id, _| !seeded.contains(id));
         captured.retain(|id, _| !seeded.contains(id));
         // Cached before `FlowRunFinished`, so a partial run started on that
@@ -1677,13 +1690,9 @@ impl FlowExecutionService {
             external_secrets,
         );
         secret_values.extend(ctx.dot_env_values.iter().cloned());
-        // A script source holds the escaped form of a value, so that form is masked too.
-        let escaped_forms: Vec<String> = secret_values
-            .iter()
-            .map(|v| crate::flow_script_literals::escape_value(v))
-            .filter(|e| !secret_values.contains(e))
-            .collect();
-        secret_values.extend(escaped_forms);
+        // A script source holds the escaped form of a value, and JSON.stringify holds the JSON
+        // form, so those forms are masked too.
+        add_escaped_forms(&mut secret_values);
         // Trace values are masked like an Output value: every secret variable
         // and every form of every Auth-node credential. The Request arm
         // rebinds `secret_values` later, so this set is built first.
@@ -1716,6 +1725,12 @@ impl FlowExecutionService {
                     logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
                 }
                 let resolved = rocket_environment::resolve(value.data(), &vars).output;
+                // A host value the text named is masked in the step, like a `.env` value.
+                if names_process_env && ctx.process_env.allowed {
+                    let used = used_process_env_values(value.data(), &ctx.process_env);
+                    trace_masks.extend(used);
+                    add_escaped_forms(&mut trace_masks);
+                }
                 // Wires get the raw value. The step shows it masked, then capped.
                 let (reported, cut) = mask_then_cap(&resolved, &trace_masks, STEP_VALUE_LIMIT);
                 trace.step.value_truncated = cut;
@@ -1753,6 +1768,7 @@ impl FlowExecutionService {
                     logs,
                     &edge.expression,
                 );
+                extend_with_scope(&script_scope, &mut secret_values, &mut trace_masks);
                 let outcome = exec
                     .resolve_flow_wire_expression(
                         &input.collection,
@@ -1837,6 +1853,7 @@ impl FlowExecutionService {
                         logs,
                         &edge.expression,
                     );
+                    extend_with_scope(&script_scope, &mut secret_values, &mut trace_masks);
                     let outcome = exec
                         .resolve_flow_wire_expression(
                             &input.collection,
@@ -1909,6 +1926,8 @@ impl FlowExecutionService {
                             &secrets,
                         );
                         values.extend(ctx.dot_env_values.iter().cloned());
+                        values.extend(script_scope.extra_masks().iter().cloned());
+                        add_escaped_forms(&mut values);
                         request_secret_values = std::borrow::Cow::Owned(values);
                         request_secrets = std::borrow::Cow::Owned(secrets);
                     }
@@ -2065,6 +2084,7 @@ impl FlowExecutionService {
                     logs,
                     script,
                 );
+                extend_with_scope(&script_scope, &mut secret_values, &mut trace_masks);
                 let outcome = exec
                     .evaluate_flow_transform_value(
                         &input.collection,
@@ -2259,6 +2279,22 @@ fn record_input_wire(
     }
 }
 
+/// Adds the script-escaped and JSON-escaped form of every value in `values`.
+fn add_escaped_forms(values: &mut HashSet<String>) {
+    let forms: Vec<String> = values
+        .iter()
+        .flat_map(|v| {
+            [
+                Some(crate::flow_script_literals::escape_value(v)),
+                crate::redaction::json_escaped_form(v),
+            ]
+        })
+        .flatten()
+        .filter(|f| !values.contains(f))
+        .collect();
+    values.extend(forms);
+}
+
 /// The variables one node's scripts fill `{{name}}` placeholders from.
 ///
 /// It is built once, on the first source that has a placeholder, and every wire
@@ -2271,9 +2307,19 @@ struct ScriptScope {
     warned: bool,
 }
 
+/// Masks the scope's forms and the `process.env` values it used in a node's mask sets.
+fn extend_with_scope(
+    scope: &ScriptScope,
+    secret_values: &mut HashSet<String>,
+    trace_masks: &mut HashSet<String>,
+) {
+    secret_values.extend(scope.extra_masks().iter().cloned());
+    trace_masks.extend(scope.extra_masks().iter().cloned());
+}
+
 impl ScriptScope {
-    /// Forms of nested secret values that a log or error must mask.
-    #[allow(dead_code)]
+    /// Forms of nested secret values, and the `process.env` values the lookup used, that a log
+    /// or error must mask.
     fn extra_masks(&self) -> &HashSet<String> {
         &self.masks
     }
@@ -2301,6 +2347,7 @@ impl ScriptScope {
             self.warned = true;
             logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
         }
+        // Callbacks are read only on the first build and are fixed during a node.
         if self.vars.is_none() {
             let scopes = exec.flow_variable_scopes(
                 input.global_env_name.as_deref(),
@@ -2310,7 +2357,7 @@ impl ScriptScope {
             );
             let expanded =
                 crate::execution_service::expanded_send(&scopes, callbacks, &mut HashMap::new());
-            self.masks.extend(expanded.secret_forms);
+            self.add_masks(expanded.secret_forms);
             let mut vars = expanded.values;
             // Host values are the lowest layer and are never filled.
             if ctx.process_env.allowed {
@@ -2322,12 +2369,33 @@ impl ScriptScope {
             self.vars = Some(vars);
         }
         let vars = self.vars.get_or_insert_with(HashMap::new);
-        crate::flow_script_literals::resolve_script_literals_with(source, &mut |name| match name
-            .strip_prefix('$')
-        {
-            Some(dynamic) => rocket_environment::dynamic_vars::generate(dynamic),
-            None => vars.get(name).cloned(),
-        })
+        let mut used_env: Vec<String> = Vec::new();
+        let resolved = crate::flow_script_literals::resolve_script_literals_with(
+            source,
+            &mut |name| match name.strip_prefix('$') {
+                Some(dynamic) => rocket_environment::dynamic_vars::generate(dynamic),
+                None => {
+                    let value = vars.get(name).cloned();
+                    // Only a value the host map answered counts as a used host value.
+                    if let (Some(v), Some(key)) = (&value, name.strip_prefix("process.env.")) {
+                        if ctx.process_env.vars.get(key) == Some(v) && v.len() >= MIN_REDACTION_LEN
+                        {
+                            used_env.push(v.clone());
+                        }
+                    }
+                    value
+                }
+            },
+        );
+        self.add_masks(used_env);
+        resolved
+    }
+
+    /// Adds `values` with their escaped forms to the masks.
+    fn add_masks(&mut self, values: impl IntoIterator<Item = String>) {
+        let mut added: HashSet<String> = values.into_iter().collect();
+        add_escaped_forms(&mut added);
+        self.masks.extend(added);
     }
 }
 
@@ -11212,14 +11280,113 @@ mod tests {
             .variables
             .push(collection_var("note", "{{process.env.HOME}}"));
         let executor = RecordingExecutor::new();
-        let exec = exec_with_collection(&executor, collection)
-            .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+        // The host environment is open, so a rescan would fill `HOME`.
+        let exec = exec_with_collection(&executor, collection);
 
         run_body_wire(&exec, &executor, "return '{{note}}';", "x").await;
 
         assert_eq!(
             executor.sent_bodies()[1].as_deref(),
             Some("{{process.env.HOME}}")
+        );
+    }
+
+    /// Every log and trace text of the run, without the request bodies a wire value feeds.
+    fn logs_and_traces(summary: &FlowRunSummary) -> String {
+        summary
+            .steps
+            .iter()
+            .map(|s| format!("{:?}|{:?}|{:?}", s.logs, s.trace, s.value))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_json_stringified_secret_with_quotes_is_masked_in_logs() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_key_exec_with(&executor, "pa\"ss\\wo/rd'1");
+
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "const d = JSON.stringify({p: '{{apiKey}}'}); console.log(d); return d;",
+            "x",
+        )
+        .await;
+
+        let shown = logs_and_traces(&summary);
+        let raw = "pa\"ss\\wo/rd'1";
+        let js_escaped = crate::flow_script_literals::escape_value(raw);
+        let json_escaped = crate::redaction::json_escaped_form(raw).expect("differs");
+        for form in [raw, js_escaped.as_str(), json_escaped.as_str()] {
+            assert!(!shown.contains(form), "{form} leaked: {shown}");
+        }
+        let logs = &step_of(&summary, "b").logs;
+        assert!(
+            logs.iter()
+                .any(|l| l.message.contains(crate::redaction::REDACTED)),
+            "{logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_used_os_process_env_value_is_masked() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let os_path = std::env::var("PATH").expect("PATH is set");
+
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "console.log('{{process.env.PATH}}'); return 'x';",
+            "x",
+        )
+        .await;
+
+        let shown = logs_and_traces(&summary);
+        assert!(!shown.contains(&os_path), "{shown}");
+        let logs = &step_of(&summary, "b").logs;
+        assert!(
+            logs.iter().any(|l| l.message == crate::redaction::REDACTED),
+            "{logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unused_os_process_env_value_is_not_masked() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let home = std::env::var("HOME").expect("HOME is set");
+        let literal = serde_json::to_string(&home).expect("json");
+        let expression =
+            format!("console.log('{{{{process.env.PATH}}}}'.length, {literal}); return 'x';");
+
+        let summary = run_body_wire(&exec, &executor, &expression, "x").await;
+
+        let logs = &step_of(&summary, "b").logs;
+        assert!(
+            logs.iter().any(|l| l.message.contains(&home)),
+            "an unnamed value stays visible: {logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_input_node_masks_a_used_os_process_env_value() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let os_path = std::env::var("PATH").expect("PATH is set");
+
+        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+
+        let shown = format!("{:?}", step_of(&summary, "i"));
+        assert!(!shown.contains(&os_path), "{shown}");
+        assert!(
+            step_of(&summary, "i")
+                .value
+                .as_deref()
+                .is_some_and(|v| v.contains(crate::redaction::REDACTED)),
+            "{:?}",
+            step_of(&summary, "i").value
         );
     }
 

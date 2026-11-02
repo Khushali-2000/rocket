@@ -1,7 +1,9 @@
 //! The request as sent, for the frontend Console row.
 
 use crate::execution_service::map_auth_fields;
-use crate::redaction::{redact_secrets, redact_url_secrets, secret_forms, MIN_REDACTION_LEN};
+use crate::redaction::{
+    json_escaped_form, redact_secrets, redact_url_secrets, secret_forms, MIN_REDACTION_LEN,
+};
 use rocket_http::HttpRequest;
 use rocket_shared::types::{Auth, Body, Header, QueryParam};
 use serde::Serialize;
@@ -63,15 +65,8 @@ pub(crate) fn sent_request_masked(
     let mut forms: HashSet<String> = secret_forms(vault_values).into_iter().collect();
     // A JSON body can carry a value in its escaped form.
     for v in vault_values.iter().filter(|v| v.len() >= MIN_REDACTION_LEN) {
-        if let Ok(quoted) = serde_json::to_string(v) {
-            // Only the outer quotes go, so a value ending in a quote keeps its escaped quote.
-            let escaped = quoted
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(&quoted);
-            if escaped != v.as_str() {
-                forms.insert(escaped.to_string());
-            }
+        if let Some(escaped) = json_escaped_form(v) {
+            forms.insert(escaped);
         }
     }
     let mask = |text: &str| redact_secrets(text, &forms);
