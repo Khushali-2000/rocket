@@ -1,8 +1,20 @@
+# Claude Code review for pull requests, including PRs from forks.
+#
+# Trust model: this runs on pull_request_target, so it has the base repo secrets.
+# It never checks out PR code. A fork PR is reviewed only after a maintainer adds
+# the `safe-to-review` label. The action checks that the user who triggered the
+# run has write access, and on a `labeled` event that user is the maintainer.
+# A later push from the fork author is skipped until the label is added again.
+#
+# To revert to the old pull_request workflow (it fails on fork PRs):
+#   git revert <commit that introduced this file version>
+# See .claude/docs/claude-review-fork-prs.md.
+
 name: Claude Code Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review, reopened, labeled]
     branches: [main]
 
 concurrency:
@@ -11,24 +23,35 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Trusted authors run on every event. Everyone else needs the label.
+    if: >-
+      github.event.pull_request.draft == false && (
+        (github.event.action == 'labeled' && github.event.label.name == 'safe-to-review') ||
+        (github.event.action != 'labeled' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
+      )
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
-      id-token: write
     steps:
+      # Base branch only. Never set `ref` to the PR head here.
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Claude Code Review
         uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1
+        env:
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
-          plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          claude_args: '--allowedTools "Skill(code-review:code-review),mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"'
+          # Use the job token so no write-scoped GitHub App token is created.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: "/pr-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          claude_args: >-
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --disallowedTools "Bash(gh pr comment *),Bash(gh api *),Bash(gh issue *),Bash(gh search *),Bash(gh pr list *),WebFetch,WebSearch"
