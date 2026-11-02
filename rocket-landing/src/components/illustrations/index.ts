@@ -1,0 +1,22 @@
+export { RocketBook } from './RocketBook';
+export { RocketCelebrate } from './RocketCelebrate';
+export { RocketClock } from './RocketClock';
+export { RocketCloud } from './RocketCloud';
+export { RocketConstruction } from './RocketConstruction';
+export { RocketError } from './RocketError';
+export { RocketFolder } from './RocketFolder';
+export { RocketGroup } from './RocketGroup';
+export { RocketIdle } from './RocketIdle';
+// Legacy alias.
+export { RocketLaunch, RocketLaunch as RocketIllustration } from './RocketLaunch';
+export { RocketLiftOff } from './RocketLiftoff';
+export { RocketLock } from './RocketLock';
+export { RocketMinimal } from './RocketMinimal';
+export { RocketOrbit } from './RocketOrbit';
+export { RocketPlanet } from './RocketPlanet';
+export { RocketPlug } from './RocketPlug';
+export { RocketSearch } from './RocketSearch';
+export { RocketSleep } from './RocketSleep';
+export { RocketSpeed } from './RocketSpeed';
+export { RocketStar } from './RocketStar';
+export { RocketTelescope } from './RocketTelescope';
