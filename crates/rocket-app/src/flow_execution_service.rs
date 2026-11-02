@@ -2058,7 +2058,9 @@ impl FlowExecutionService {
                     .await;
                 logs.extend(outcome.logs);
                 // A string result stays text for wires. Other results stay JSON.
-                let value = outcome.result?;
+                let value = outcome
+                    .result
+                    .map_err(|e| crate::redaction::redact_error(e, &trace_masks))?;
                 // Wires get the raw text. The step shows it masked, then capped.
                 let (reported, cut) = mask_then_cap(value.data(), &trace_masks, STEP_VALUE_LIMIT);
                 trace.step.value_truncated = cut;
@@ -2284,7 +2286,8 @@ fn fail_wire(
     masks: &HashSet<String>,
 ) -> DomainError {
     trace.record_failure(edge, &e.to_string(), masks);
-    crate::flow_trace::wire_err(edge, e)
+    // The returned error can hold a script source with resolved secrets.
+    crate::flow_trace::wire_err(edge, crate::redaction::redact_error(e, masks))
 }
 
 /// Turns one node's `execute_node` outcome into its `FlowStepResult`. A node
@@ -11151,6 +11154,68 @@ mod tests {
 
         let shown = format!("{:?}", summary.steps);
         assert!(!shown.contains("k-secret-123456"), "{shown}");
+        // Resolution ran: the log shows the mask, not the placeholder text.
+        let logs = &step_of(&summary, "b").logs;
+        assert!(
+            logs.iter().any(|l| l.message == crate::redaction::REDACTED),
+            "{logs:?}"
+        );
+        assert!(
+            logs.iter().all(|l| !l.message.contains("{{apiKey}}")),
+            "{logs:?}"
+        );
+    }
+
+    fn secret_key_exec(executor: &Arc<RecordingExecutor>) -> RequestExecutionService {
+        let mut collection = rocket_collection::Collection::new("my-api");
+        let mut var = collection_var("apiKey", "k-secret-123456");
+        var.secret = true;
+        collection.settings.variables.push(var);
+        exec_with_collection(executor, collection)
+    }
+
+    #[tokio::test]
+    async fn a_failed_wire_script_never_shows_the_resolved_secret() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_key_exec(&executor);
+
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "let x = null; return x && '{{apiKey}}';",
+            "x",
+        )
+        .await;
+
+        let b = step_of(&summary, "b");
+        assert!(b.error.is_some(), "{b:?}");
+        assert!(!format!("{b:?}").contains("k-secret-123456"), "{b:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_transform_script_never_shows_the_resolved_secret() {
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                input_node_with("in", "x"),
+                transform_node("t", "throw new Error('{{apiKey}}');"),
+            ],
+            edges: vec![input_edge("e1", "in", "t")],
+            callback_host: None,
+        };
+        let executor = RecordingExecutor::new();
+        let exec = secret_key_exec(&executor);
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service.run(&exec, run_input("wired")).await.expect("run");
+
+        let t = step_of(&summary, "t");
+        assert!(t.error.is_some(), "{t:?}");
+        assert!(!format!("{t:?}").contains("k-secret-123456"), "{t:?}");
     }
 
     #[tokio::test]
