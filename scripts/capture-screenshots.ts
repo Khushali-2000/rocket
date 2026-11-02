@@ -5,7 +5,7 @@
  * Vite. It then navigates through each feature screen and captures
  * screenshots in both light and dark mode.
  *
- * Usage: npx tsx scripts/capture-screenshots.ts
+ * Usage: bunx tsx scripts/capture-screenshots.ts
  * Set ROCKET_URL to point at a different server.
  */
 
@@ -174,7 +174,7 @@ async function main(): Promise<void> {
     } else {
       console.log('Starting Vite dev server...');
       const port = new URL(BASE_URL).port || '1420';
-      devServer = spawn('npx', ['vite', '--port', port], {
+      devServer = spawn('bunx', ['vite', '--port', port], {
         cwd: resolve(__dirname, '..'),
         stdio: 'pipe',
         shell: true,

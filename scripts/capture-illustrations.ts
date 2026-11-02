@@ -2,7 +2,7 @@
  * Captures each SVG illustration as a standalone PNG in both themes.
  * Reads the TSX files, extracts SVG markup, and renders via Playwright.
  *
- * Usage: npx tsx scripts/capture-illustrations.ts
+ * Usage: bunx tsx scripts/capture-illustrations.ts
  */
 
 import { readdirSync, readFileSync } from 'node:fs';

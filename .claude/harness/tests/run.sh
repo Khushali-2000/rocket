@@ -77,14 +77,14 @@ else
   fail "guard log format"
 fi
 
-# Commit gate with fake yarn and cargo.
+# Commit gate with fake bun and cargo.
 repo2="$tmp/gaterepo"
 mkdir -p "$repo2" "$tmp/bin"
 git -C "$repo2" init -q
-cat >"$tmp/bin/yarn" <<EOF
+cat >"$tmp/bin/bun" <<EOF
 #!/usr/bin/env bash
-echo "yarn \$*" >>"$tmp/calls"
-[ -n "\${FAKE_FAIL:-}" ] && { echo "boom from yarn"; exit 1; }
+echo "bun \$*" >>"$tmp/calls"
+[ -n "\${FAKE_FAIL:-}" ] && { echo "boom from bun"; exit 1; }
 exit 0
 EOF
 cat >"$tmp/bin/cargo" <<EOF
@@ -92,7 +92,7 @@ cat >"$tmp/bin/cargo" <<EOF
 echo "cargo \$*" >>"$tmp/calls"
 exit 0
 EOF
-chmod +x "$tmp/bin/yarn" "$tmp/bin/cargo"
+chmod +x "$tmp/bin/bun" "$tmp/bin/cargo"
 gate() { payload "$1" "$repo2" | PATH="$tmp/bin:$PATH" bash "$harness/hooks/commit-gate"; }
 
 : >"$tmp/calls"
@@ -104,7 +104,7 @@ HARNESS_GATE=0 gate "git commit -m x" >/dev/null; rc=$?
 [ $rc -eq 0 ] && [ ! -s "$tmp/calls" ] && pass "gate: HARNESS_GATE=0 skips" || fail "gate: HARNESS_GATE=0 skips"
 
 out="$(gate "git commit -m x")"; rc=$?
-if [ $rc -eq 0 ] && grep -q "yarn tsc --noEmit" "$tmp/calls" && grep -q "yarn check" "$tmp/calls" && ! grep -q cargo "$tmp/calls"; then
+if [ $rc -eq 0 ] && grep -q "bun run tsc --noEmit" "$tmp/calls" && grep -q "bun run check" "$tmp/calls" && ! grep -q cargo "$tmp/calls"; then
   pass "gate: staged ts runs tsc and check"
 else
   fail "gate: staged ts runs tsc and check"
@@ -112,7 +112,7 @@ fi
 
 : >"$tmp/calls"
 out="$(FAKE_FAIL=1 gate "git commit -m x")"; rc=$?
-if [ $rc -eq 2 ] && grep -q "boom from yarn" <<<"$out" && grep -q commit-gate-fail "$tmp/log/guard.log"; then
+if [ $rc -eq 2 ] && grep -q "boom from bun" <<<"$out" && grep -q commit-gate-fail "$tmp/log/guard.log"; then
   pass "gate: failing check denies with output and logs"
 else
   fail "gate: failing check denies (rc=$rc)"
@@ -121,7 +121,7 @@ fi
 git -C "$repo2" reset -q; echo y >"$repo2/b.rs"; git -C "$repo2" add b.rs
 : >"$tmp/calls"
 gate "git commit -m x" >/dev/null; rc=$?
-if [ $rc -eq 0 ] && grep -q "cargo check -j4" "$tmp/calls" && ! grep -q yarn "$tmp/calls"; then
+if [ $rc -eq 0 ] && grep -q "cargo check -j4" "$tmp/calls" && ! grep -q bun "$tmp/calls"; then
   pass "gate: staged rs runs cargo check -j4"
 else
   fail "gate: staged rs runs cargo check -j4"

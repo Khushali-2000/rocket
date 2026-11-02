@@ -263,7 +263,7 @@ function generateHTML(
       <div class="section-header">Rust Tests by Crate</div>
       ${
         tests.length === 0
-          ? `<div class="empty">No test results — run <code>yarn coverage</code> first</div>`
+          ? `<div class="empty">No test results — run <code>bun run coverage</code> first</div>`
           : `<table>
           <thead><tr><th>Crate</th><th>Status</th><th>Passed</th><th>Failed</th><th>Ignored</th></tr></thead>
           <tbody>${crateRows}</tbody>
@@ -300,7 +300,7 @@ function generateHTML(
       <div class="section-header">Frontend Coverage (TypeScript)</div>
       ${
         fe.rows.length === 0
-          ? `<div class="empty">No frontend coverage data — run <code>yarn coverage:frontend</code> first</div>`
+          ? `<div class="empty">No frontend coverage data — run <code>bun run coverage:frontend</code> first</div>`
           : `<table>
           <thead><tr><th>File</th><th>Lines</th><th>Statements</th><th>Functions</th><th>Branches</th></tr></thead>
           <tbody>${feRows}${totalRow}</tbody>
@@ -336,7 +336,7 @@ function generateHTML(
       <div class="section-header">Rust Coverage</div>
       ${
         rs.rows.length === 0
-          ? `<div class="empty">No Rust coverage data — run <code>yarn coverage:rust</code> first</div>`
+          ? `<div class="empty">No Rust coverage data — run <code>bun run coverage:rust</code> first</div>`
           : `<table>
           <thead><tr><th>File</th><th>Lines</th><th>Functions</th><th>Regions</th></tr></thead>
           <tbody>${rsRows}${rsTotalRow}</tbody>

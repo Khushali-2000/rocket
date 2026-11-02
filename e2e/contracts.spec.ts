@@ -1,7 +1,7 @@
 /**
  * Contract Lock E2E tests — fixture-based, Tauri IPC mocked.
  *
- * These tests run against the Vite dev server (yarn dev) with
+ * These tests run against the Vite dev server (bun run dev) with
  * window.__TAURI__ injected via addInitScript before React boots.
  * The mock provides a TestCollection with GET/POST /payments requests
  * and handles all contract CRUD commands in-memory.

@@ -22,7 +22,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'yarn dev',
+    command: 'bun run dev',
     url: 'http://localhost:1420',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

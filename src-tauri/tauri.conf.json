@@ -4,9 +4,9 @@
   "version": "2.1.4",
   "identifier": "com.numericlabs.rocket",
   "build": {
-    "beforeDevCommand": "yarn dev",
+    "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "yarn build",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
