@@ -1677,6 +1677,13 @@ impl FlowExecutionService {
             external_secrets,
         );
         secret_values.extend(ctx.dot_env_values.iter().cloned());
+        // A script source holds the escaped form of a value, so that form is masked too.
+        let escaped_forms: Vec<String> = secret_values
+            .iter()
+            .map(|v| crate::flow_script_literals::escape_value(v))
+            .filter(|e| !secret_values.contains(e))
+            .collect();
+        secret_values.extend(escaped_forms);
         // Trace values are masked like an Output value: every secret variable
         // and every form of every Auth-node credential. The Request arm
         // rebinds `secret_values` later, so this set is built first.
@@ -11119,7 +11126,13 @@ mod tests {
         let executor = RecordingExecutor::new();
         let exec = secret_var_exec(&executor);
 
-        run_body_wire(&exec, &executor, "response.body", "{{apiKey}}").await;
+        run_body_wire(
+            &exec,
+            &executor,
+            "const unused = '{{nope}}'; return response.body;",
+            "{{apiKey}}",
+        )
+        .await;
 
         assert_eq!(executor.sent_bodies()[1].as_deref(), Some("{{apiKey}}"));
     }
@@ -11167,8 +11180,15 @@ mod tests {
     }
 
     fn secret_key_exec(executor: &Arc<RecordingExecutor>) -> RequestExecutionService {
+        secret_key_exec_with(executor, "k-secret-123456")
+    }
+
+    fn secret_key_exec_with(
+        executor: &Arc<RecordingExecutor>,
+        value: &str,
+    ) -> RequestExecutionService {
         let mut collection = rocket_collection::Collection::new("my-api");
-        let mut var = collection_var("apiKey", "k-secret-123456");
+        let mut var = collection_var("apiKey", value);
         var.secret = true;
         collection.settings.variables.push(var);
         exec_with_collection(executor, collection)
@@ -11216,6 +11236,118 @@ mod tests {
         let t = step_of(&summary, "t");
         assert!(t.error.is_some(), "{t:?}");
         assert!(!format!("{t:?}").contains("k-secret-123456"), "{t:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_wire_script_hides_a_secret_with_special_characters() {
+        let executor = RecordingExecutor::new();
+        let exec = secret_key_exec_with(&executor, "Pa$$w0rd!x");
+
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "let x = null; return x && '{{apiKey}}';",
+            "x",
+        )
+        .await;
+
+        let b = step_of(&summary, "b");
+        assert!(b.error.is_some(), "{b:?}");
+        let shown = format!("{:?}", summary.steps);
+        assert!(!shown.contains("Pa$$w0rd!x"), "{shown}");
+        assert!(!shown.contains("Pa\\$\\$w0rd!x"), "{shown}");
+        // Debug output doubles each backslash.
+        assert!(!shown.contains("Pa\\\\$\\\\$w0rd!x"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_transform_hides_a_secret_with_special_characters() {
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                input_node_with("in", "x"),
+                transform_node("t", "throw new Error('{{apiKey}}');"),
+            ],
+            edges: vec![input_edge("e1", "in", "t")],
+            callback_host: None,
+        };
+        let executor = RecordingExecutor::new();
+        let exec = secret_key_exec_with(&executor, "Pa$$w0rd!x");
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service.run(&exec, run_input("wired")).await.expect("run");
+
+        assert!(step_of(&summary, "t").error.is_some());
+        let shown = format!("{:?}", summary.steps);
+        assert!(!shown.contains("Pa$$w0rd!x"), "{shown}");
+        assert!(!shown.contains("Pa\\$\\$w0rd!x"), "{shown}");
+        // Debug output doubles each backslash.
+        assert!(!shown.contains("Pa\\\\$\\\\$w0rd!x"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_wire_script_resolves_a_vault_alias_with_a_hyphen() {
+        let mut env = Environment::new("prod");
+        env.external_secrets
+            .push(rocket_environment::ExternalSecretBinding {
+                alias: "pass".to_string(),
+                connection_id: "conn-1".to_string(),
+                vault_name: "prod-vault".to_string(),
+                secret_names: vec![rocket_environment::ExternalSecretRef {
+                    name: "numericlabs-local-admin".to_string(),
+                    secret_id: "sec-1".to_string(),
+                }],
+            });
+        let connection = rocket_environment::SecretManagerConnection {
+            id: "conn-1".to_string(),
+            label: "Prod RocketVault".to_string(),
+            base_url: "https://vault.internal:8774".to_string(),
+            client_id: "rocketapi".to_string(),
+            verify_ssl: true,
+            allow_insecure_http: false,
+            provider: Default::default(),
+            config: None,
+        };
+        let mut values = HashMap::new();
+        values.insert("sec-1".to_string(), "vault-pass-987".to_string());
+        let fetcher = FakeVaultSecretFetcher::new(values);
+        let executor = RecordingExecutor::new();
+        let exec = RequestExecutionService::new(
+            Box::new(StaticEnvRepo(env)),
+            Arc::new(SharedExecutor(Arc::clone(&executor))),
+            Box::new(NullHistoryRepo),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(FakeSecretManagerRepo(connection)),
+            Arc::new(FakeSecretStore("client-secret".to_string())),
+            Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
+        )
+        .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+        let flow = Flow {
+            name: "wired".to_string(),
+            nodes: vec![
+                request_flow_node("a", "https://api.example.com/a"),
+                request_flow_node("b", "https://api.example.com/b"),
+            ],
+            edges: vec![FlowEdge {
+                target_field: "body".to_string(),
+                expression: "return '{{pass.numericlabs-local-admin}}';".to_string(),
+                ..wire("e1", "a", "b")
+            }],
+            callback_host: None,
+        };
+        let service = service_with_flow(flow);
+        let mut input = run_input("wired");
+        input.environment_name = Some("prod".to_string());
+
+        service.run(&exec, input).await.expect("run");
+
+        assert_eq!(executor.sent_bodies()[1].as_deref(), Some("vault-pass-987"));
     }
 
     #[tokio::test]

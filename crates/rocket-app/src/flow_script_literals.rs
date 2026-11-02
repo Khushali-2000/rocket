@@ -32,7 +32,8 @@ enum State {
 /// Walks the source once and asks `lookup` for each placeholder inside a string.
 ///
 /// Regex literals are not lexed, so a quote inside a regex can open a bogus
-/// string. Values are escaped for every string kind, which keeps that safe.
+/// string. Values are escaped for every string kind and for `/`, so a value
+/// cannot close a regex literal either.
 fn scan(source: &str, lookup: &mut dyn FnMut(&str) -> Option<String>) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
@@ -143,8 +144,8 @@ fn find_close(chars: &[char], from: usize) -> Option<usize> {
     None
 }
 
-/// Escapes a value so it is inert inside any kind of JS string.
-fn escape_value(value: &str) -> String {
+/// Escapes a value so it is inert inside any kind of JS string or regex literal.
+pub(crate) fn escape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
@@ -152,7 +153,7 @@ fn escape_value(value: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\u{2028}' => out.push_str("\\u2028"),
             '\u{2029}' => out.push_str("\\u2029"),
-            '\\' | '\'' | '"' | '`' | '$' => {
+            '\\' | '\'' | '"' | '`' | '$' | '/' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -280,6 +281,16 @@ mod tests {
         assert_eq!(
             resolve_script_literals("/'/.test(s); \"{{v}}\"", &m),
             "/'/.test(s); \"a\\\" + evil() + \\\"\""
+        );
+    }
+
+    #[test]
+    fn slash_in_a_value_cannot_end_a_regex_literal() {
+        let mut m = vars();
+        m.insert("v".to_string(), "x/; evil(); /".to_string());
+        assert_eq!(
+            resolve_script_literals("/'{{v}}'/.test(body)", &m),
+            "/'x\\/; evil(); \\/'/.test(body)"
         );
     }
 
