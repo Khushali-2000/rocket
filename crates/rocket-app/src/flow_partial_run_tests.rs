@@ -85,6 +85,24 @@ struct Harness {
     exec: RequestExecutionService,
 }
 
+/// An execution service whose collection is `collection`, so a test can change a variable.
+fn exec_for(http: &Arc<RecordingExecutor>, collection: Collection) -> RequestExecutionService {
+    RequestExecutionService::new(
+        Box::new(NullEnvRepo),
+        Arc::new(SharedExecutor(Arc::clone(http))),
+        Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
+            collection,
+        ))),
+        Box::new(NullCookieRepo),
+        Box::new(SharedPublisher(RecordingPublisher::new())),
+        Box::new(EmptySecretManagerRepo),
+        Arc::new(rocket_environment::NullSecretStore),
+        Arc::new(rocket_environment::NullVaultSecretFetcher),
+    )
+    .with_script_engine(Box::new(BodyEngine))
+}
+
 fn harness(flow: rocket_flow::Flow) -> Harness {
     let flows = SharedFlowRepo::default();
     flows.put(flow);
@@ -99,20 +117,7 @@ fn harness(flow: rocket_flow::Flow) -> Harness {
         Box::new(SharedPublisher(Arc::clone(&events))),
     )
     .with_callback_listener(Box::new(Arc::clone(&callbacks)));
-    let exec = RequestExecutionService::new(
-        Box::new(NullEnvRepo),
-        Arc::new(SharedExecutor(Arc::clone(&http))),
-        Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
-        Box::new(SharedCollectionRepo(InMemoryCollectionRepo::new(
-            Collection::new("my-api"),
-        ))),
-        Box::new(NullCookieRepo),
-        Box::new(SharedPublisher(RecordingPublisher::new())),
-        Box::new(EmptySecretManagerRepo),
-        Arc::new(rocket_environment::NullSecretStore),
-        Arc::new(rocket_environment::NullVaultSecretFetcher),
-    )
-    .with_script_engine(Box::new(BodyEngine));
+    let exec = exec_for(&http, Collection::new("my-api"));
     Harness {
         flows,
         http,
@@ -836,4 +841,104 @@ async fn client_run_id_stop_cancels_only_that_run() {
     assert!(!signal_a.is_cancelled());
     assert!(h.service.is_cancelled("run-b"));
     assert!(!h.service.is_cancelled("run-a"));
+}
+
+/// A collection with one plain variable `k`.
+fn collection_with_k(value: &str) -> Collection {
+    let mut collection = Collection::new("my-api");
+    collection
+        .settings
+        .variables
+        .push(rocket_collection::CollectionVariable {
+            key: "k".to_string(),
+            value: value.to_string(),
+            initial_value: String::new(),
+            enabled: true,
+            secret: false,
+        });
+    collection
+}
+
+/// in -> t (script reads `{{k}}`) -> out.
+fn script_flow() -> rocket_flow::Flow {
+    flow(
+        vec![
+            at(
+                "in",
+                FlowNodeKind::Input {
+                    label: "in".to_string(),
+                    value: rocket_shared::VariableValue::simple("pro"),
+                },
+            ),
+            at(
+                "t",
+                FlowNodeKind::Transform {
+                    label: "t".to_string(),
+                    script: "return '{{k}}' + response.body;".to_string(),
+                },
+            ),
+            output("out"),
+        ],
+        vec![
+            FlowEdge {
+                id: "e1".to_string(),
+                source_node_id: "in".to_string(),
+                target_node_id: "t".to_string(),
+                target_field: handle::INPUT.to_string(),
+                expression: String::new(),
+                source_handle: handle::RESULT.to_string(),
+            },
+            wire("e2", "t", "out", "value"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn a_script_node_is_reused_until_a_plain_variable_it_uses_changes() {
+    let h = harness(script_flow());
+    let exec_one = exec_for(&h.http, collection_with_k("one"));
+    let base = h.service.run(&exec_one, input()).await.expect("base run");
+
+    // Nothing changed: the cached script is reused and only `out` runs.
+    let reused = h
+        .service
+        .run_partial(
+            &exec_one,
+            input(),
+            FlowAuthTokens::new(),
+            partial(&base.run_id, "out", FlowPartialMode::Node),
+        )
+        .await
+        .expect("nothing changed");
+    assert_eq!(node_ids(&reused), vec!["out"]);
+
+    // The variable changed: reusing the script's old output is refused.
+    let exec_two = exec_for(&h.http, collection_with_k("two"));
+    let err = h
+        .service
+        .run_partial(
+            &exec_two,
+            input(),
+            FlowAuthTokens::new(),
+            partial(&base.run_id, "out", FlowPartialMode::Node),
+        )
+        .await
+        .expect_err("the script's variable changed");
+    let text = err.to_string();
+    assert!(text.contains("'t' changed since the earlier run"), "{text}");
+
+    // Running the script node itself is allowed and runs it again.
+    let rerun = h
+        .service
+        .run_partial(
+            &exec_two,
+            input(),
+            FlowAuthTokens::new(),
+            partial(&base.run_id, "t", FlowPartialMode::Node),
+        )
+        .await
+        .expect("the start node may follow the new value");
+    // The Input node always runs again with its start node.
+    assert_eq!(node_ids(&rerun), vec!["in", "t"]);
+    assert_eq!(step(&rerun, "t").status, FlowNodeStatus::Success);
 }

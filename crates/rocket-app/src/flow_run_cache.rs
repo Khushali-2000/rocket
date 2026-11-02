@@ -452,11 +452,22 @@ pub(crate) fn saved_request_text(request: &Request) -> String {
 /// not hashed. `DefaultHasher` is fine because the value never leaves this
 /// process. Settings a saved request inherits from its folder or collection
 /// are not hashed, so an edit to them goes unseen (decision D5).
+///
+/// A Transform script, an Input value and an edge expression that contain
+/// `{{` also hash `resolved(text)`, so a changed plain variable changes the
+/// fingerprint. Request nodes do not (decision D5). The resolved text is
+/// never kept, only its hash.
 pub(crate) fn fingerprints(
     flow: &Flow,
     order: &[String],
     saved_request: &dyn Fn(&str) -> Option<String>,
+    resolved: &dyn Fn(&str) -> Option<u64>,
 ) -> HashMap<String, u64> {
+    let hash_resolved = |text: &str, hasher: &mut DefaultHasher| {
+        if text.contains("{{") {
+            resolved(text).hash(hasher);
+        }
+    };
     let nodes_by_id = index(flow);
     let mut out: HashMap<String, u64> = HashMap::new();
     for id in order {
@@ -465,6 +476,11 @@ pub(crate) fn fingerprints(
         };
         let mut hasher = DefaultHasher::new();
         canonical_text(&node.kind).hash(&mut hasher);
+        match &node.kind {
+            FlowNodeKind::Transform { script, .. } => hash_resolved(script, &mut hasher),
+            FlowNodeKind::Input { value, .. } => hash_resolved(value.data(), &mut hasher),
+            _ => {}
+        }
         if let FlowNodeKind::Request {
             source: RequestSource::Saved { request_path },
             ..
@@ -489,6 +505,7 @@ pub(crate) fn fingerprints(
                 &e.expression,
             )
                 .hash(&mut hasher);
+            hash_resolved(&e.expression, &mut hasher);
             out.get(&e.source_node_id)
                 .copied()
                 .unwrap_or_default()
@@ -497,6 +514,29 @@ pub(crate) fn fingerprints(
         out.insert(id.clone(), hasher.finish());
     }
     out
+}
+
+/// A one-way hash of the plain values a text names with `{{name}}`.
+///
+/// Each name, in order, is hashed with its value from `vars`, or with nothing
+/// when `vars` has none. Dynamic `$` names are skipped, so the hash is stable.
+/// The caller passes plain scope values only: RocketVault and `process.env`
+/// values are not in `vars`, so a change to them goes unseen.
+pub(crate) fn plain_placeholder_hash(text: &str, vars: &HashMap<String, String>) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            break;
+        };
+        let name = after[..end].trim();
+        if !name.starts_with('$') {
+            (name, vars.get(name)).hash(&mut hasher);
+        }
+        rest = &after[end + 2..];
+    }
+    Some(hasher.finish())
 }
 
 /// The external-secrets key under which a partial run masks a value from an
@@ -697,7 +737,7 @@ mod tests {
             &scope(),
             flow,
             results(entries),
-            &fingerprints(flow, order, &|_| None),
+            &fingerprints(flow, order, &|_| None, &|_| None),
         )
     }
 
@@ -711,13 +751,13 @@ mod tests {
     #[test]
     fn moving_a_node_keeps_fingerprints_and_an_edit_changes_every_downstream_one() {
         let (flow, order) = chain(&["a", "b", "c"]);
-        let before = fingerprints(&flow, &order, &|_| None);
+        let before = fingerprints(&flow, &order, &|_| None, &|_| None);
         let mut moved = flow.clone();
         moved.nodes[0].position.x = 500.0;
-        assert_eq!(fingerprints(&moved, &order, &|_| None), before);
+        assert_eq!(fingerprints(&moved, &order, &|_| None, &|_| None), before);
         let mut edited = flow.clone();
         set_url(&mut edited, "a", "https://api.example.com/a2");
-        let after = fingerprints(&edited, &order, &|_| None);
+        let after = fingerprints(&edited, &order, &|_| None, &|_| None);
         for id in ["a", "b", "c"] {
             assert_ne!(after[id], before[id], "{id}");
         }
@@ -744,9 +784,88 @@ mod tests {
             callback_host: None,
         };
         let order = vec!["s".to_string()];
-        let one = fingerprints(&flow, &order, &|_| Some("v1".to_string()));
-        let two = fingerprints(&flow, &order, &|_| Some("v2".to_string()));
+        let one = fingerprints(&flow, &order, &|_| Some("v1".to_string()), &|_| None);
+        let two = fingerprints(&flow, &order, &|_| Some("v2".to_string()), &|_| None);
         assert_ne!(one["s"], two["s"]);
+    }
+
+    fn single_node_flow(kind: FlowNodeKind) -> (Flow, Vec<String>) {
+        let flow = Flow {
+            name: "f".to_string(),
+            nodes: vec![FlowNode {
+                id: "n".to_string(),
+                kind,
+                position: NodePosition { x: 0.0, y: 0.0 },
+            }],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        (flow, vec!["n".to_string()])
+    }
+
+    fn transform(script: &str) -> FlowNodeKind {
+        FlowNodeKind::Transform {
+            label: "t".to_string(),
+            script: script.to_string(),
+        }
+    }
+
+    fn print(flow: &Flow, order: &[String], answer: Option<u64>) -> u64 {
+        fingerprints(flow, order, &|_| None, &|_| answer)["n"]
+    }
+
+    #[test]
+    fn a_script_with_a_placeholder_changes_its_fingerprint_when_the_value_changes() {
+        let (flow, order) = single_node_flow(transform("return '{{x}}';"));
+        assert_ne!(print(&flow, &order, Some(1)), print(&flow, &order, Some(2)));
+    }
+
+    #[test]
+    fn a_script_without_a_placeholder_ignores_the_resolved_closure() {
+        let (flow, order) = single_node_flow(transform("return 1;"));
+        assert_eq!(print(&flow, &order, Some(1)), print(&flow, &order, Some(2)));
+    }
+
+    #[test]
+    fn an_input_node_with_a_placeholder_follows_the_resolved_hash() {
+        let (flow, order) = single_node_flow(FlowNodeKind::Input {
+            label: "i".to_string(),
+            value: rocket_shared::VariableValue::simple("{{x}}"),
+        });
+        assert_ne!(print(&flow, &order, Some(1)), print(&flow, &order, Some(2)));
+    }
+
+    #[test]
+    fn a_request_node_does_not_follow_the_resolved_hash() {
+        let mut flow = Flow {
+            name: "f".to_string(),
+            nodes: vec![request("n")],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        set_url(&mut flow, "n", "https://api.example.com/{{x}}");
+        let order = vec!["n".to_string()];
+        assert_eq!(print(&flow, &order, Some(1)), print(&flow, &order, Some(2)));
+    }
+
+    #[test]
+    fn an_edge_expression_with_a_placeholder_follows_the_resolved_hash() {
+        let (mut flow, order) = chain(&["a", "b"]);
+        flow.edges[0].expression = "response.body + '{{x}}'".to_string();
+        let one = fingerprints(&flow, &order, &|_| None, &|_| Some(1));
+        let two = fingerprints(&flow, &order, &|_| None, &|_| Some(2));
+        assert_ne!(one["b"], two["b"]);
+        assert_eq!(one["a"], two["a"]);
+    }
+
+    #[test]
+    fn the_plain_placeholder_hash_follows_values_and_skips_dynamic_names() {
+        let vars = |v: &str| HashMap::from([("x".to_string(), v.to_string())]);
+        let hash = |text: &str, v: &str| plain_placeholder_hash(text, &vars(v));
+        assert_ne!(hash("a {{x}}", "1"), hash("a {{x}}", "2"));
+        assert_eq!(hash("{{ x }}", "1"), hash("{{x}}", "1"));
+        assert_eq!(hash("{{$guid}}", "1"), hash("{{$guid}}", "2"));
+        assert_ne!(hash("{{y}}", "1"), hash("{{x}}", "1"));
     }
 
     #[test]
@@ -782,7 +901,7 @@ mod tests {
         let base = full_run(&flow, &order, &[("a", "1"), ("b", "2"), ("c", "3")]);
         let mut edited = flow.clone();
         set_url(&mut edited, "a", "https://api.example.com/a2");
-        let current = fingerprints(&edited, &order, &|_| None);
+        let current = fingerprints(&edited, &order, &|_| None, &|_| None);
         let err = base
             .check_unchanged(&edited, &["b".to_string()], &current)
             .expect_err("a changed");
@@ -800,7 +919,7 @@ mod tests {
         let base = full_run(&flow, &order, &[("a", "1"), ("b", "2"), ("c", "3")]);
         let mut edited = flow.clone();
         set_url(&mut edited, "c", "https://api.example.com/c2");
-        let current = fingerprints(&edited, &order, &|_| None);
+        let current = fingerprints(&edited, &order, &|_| None, &|_| None);
         base.check_unchanged(&edited, &["b".to_string()], &current)
             .expect("only the start node c changed");
     }
@@ -832,7 +951,7 @@ mod tests {
             &scope(),
             &flow,
             results(&[("au", "tok-123456"), ("big", huge.as_str()), ("ok", "fine")]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         assert!(
             run.nodes["au"].output.is_none(),
@@ -863,7 +982,7 @@ mod tests {
             &flow,
             "b",
             results(&[("b", "new")]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         assert_eq!(value_of(&merged, "b"), Some("new"));
         assert_eq!(value_of(&base, "b"), Some("old"));
@@ -889,7 +1008,7 @@ mod tests {
             &scope(),
             &flow,
             base_results,
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         let mut partial_results = results(&[("b", "3")]);
         partial_results
@@ -900,7 +1019,7 @@ mod tests {
             &flow,
             "b",
             partial_results,
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         assert!(merged.masking_secrets.contains("old-token-123456"));
         assert!(merged.masking_secrets.contains("new-token-654321"));
@@ -934,7 +1053,7 @@ mod tests {
             &scope(),
             &flow,
             entry,
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         let printed = format!("{run:?}");
         assert!(printed.contains("CachedRun"));
@@ -1017,7 +1136,7 @@ mod tests {
             &scope(),
             &flow,
             run_results,
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         match run.nodes["r"].output.as_deref() {
             Some(CapturedOutput::Request(out)) => assert!(out.deferred_history.is_none()),
@@ -1054,7 +1173,7 @@ mod tests {
             &scope(),
             &flow,
             run_results,
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         match run.nodes["r"].output.as_deref() {
             Some(CapturedOutput::Request(out)) => assert!(out.sent_request.is_none()),
@@ -1074,7 +1193,7 @@ mod tests {
                 ("b", text.as_str()),
                 ("c", text.as_str()),
             ]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
             1_000,
         );
         let kept: usize = run
@@ -1097,7 +1216,7 @@ mod tests {
             &scope(),
             &flow,
             results(&[("a", text.as_str())]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
             1_000,
         );
         let merged = base.merge_partial_with_budget(
@@ -1105,7 +1224,7 @@ mod tests {
             &flow,
             "b",
             results(&[("b", text.as_str())]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
             1_000,
         );
         assert!(merged.nodes["a"].output.is_some());
@@ -1130,7 +1249,7 @@ mod tests {
                     &scope(),
                     &flow,
                     results(entries),
-                    &fingerprints(&flow, &order, &|_| None),
+                    &fingerprints(&flow, &order, &|_| None, &|_| None),
                     1_000,
                 );
                 let mut kept: Vec<&str> = run
@@ -1155,7 +1274,7 @@ mod tests {
             &flow,
             "b",
             results(&[("b", "9")]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         assert!(merged.nodes["c"].stale);
         assert!(merged.nodes["c"].output.is_none());
@@ -1214,7 +1333,7 @@ mod tests {
             &flow,
             "b",
             results(&[("b", "new")]),
-            &fingerprints(&flow, &order, &|_| None),
+            &fingerprints(&flow, &order, &|_| None, &|_| None),
         );
         let mut cache = FlowRunCache::with_limits(8, 1_000);
         cache.insert("base".to_string(), base);

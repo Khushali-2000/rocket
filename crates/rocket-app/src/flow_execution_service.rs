@@ -1199,11 +1199,29 @@ impl FlowExecutionService {
         let (flow, order) = self.load_ordered_nodes(&input.collection, &input.flow_name)?;
         // Saved requests are read once, for fingerprints and the callback check.
         let saved = self.saved_requests(&input.collection, &flow);
-        let fingerprints = crate::flow_run_cache::fingerprints(&flow, &order, &|path| {
-            saved
-                .get(path)
-                .map(crate::flow_run_cache::saved_request_text)
-        });
+        // Plain scope values only: no RocketVault and no `process.env`, so a change
+        // to those does not invalidate a cached run.
+        let plain_vars = crate::execution_service::expanded_send(
+            &exec.flow_variable_scopes(
+                input.global_env_name.as_deref(),
+                Some(&input.collection),
+                input.environment_name.as_deref(),
+                &HashMap::new(),
+            ),
+            &HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .values;
+        let fingerprints = crate::flow_run_cache::fingerprints(
+            &flow,
+            &order,
+            &|path| {
+                saved
+                    .get(path)
+                    .map(crate::flow_run_cache::saved_request_text)
+            },
+            &|text| crate::flow_run_cache::plain_placeholder_hash(text, &plain_vars),
+        );
         // A partial run is checked before any secret is fetched or event sent,
         // so a refusal costs nothing and leaves no trace.
         let prepared = match &partial {
