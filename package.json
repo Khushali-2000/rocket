@@ -16,9 +16,9 @@
     "test:coverage": "vitest run --coverage",
     "coverage:frontend": "vitest run --coverage",
     "coverage:rust": "cargo llvm-cov --workspace --html --output-dir coverage/rust && cargo llvm-cov report --json --output-path coverage/rust/coverage-summary.json",
-    "coverage:dashboard": "npx tsx scripts/generate-coverage-dashboard.ts && echo 'Open coverage/index.html to view the dashboard'",
-    "coverage": "yarn coverage:frontend && yarn coverage:rust && yarn coverage:dashboard",
-    "manual": "npx tsx scripts/capture-screenshots.ts",
+    "coverage:dashboard": "bunx tsx scripts/generate-coverage-dashboard.ts && echo 'Open coverage/index.html to view the dashboard'",
+    "coverage": "bun run coverage:frontend && bun run coverage:rust && bun run coverage:dashboard",
+    "manual": "bunx tsx scripts/capture-screenshots.ts",
     "release": "release-it",
     "release:patch": "release-it patch",
     "release:minor": "release-it minor",
@@ -59,9 +59,9 @@
     "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-clipboard-manager": "~2.3.3",
     "@tauri-apps/plugin-dialog": "2.6.0",
-    "@tauri-apps/plugin-fs": "^2.5.0",
-    "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-os": "^2.3.2",
+    "@tauri-apps/plugin-fs": "~2.5.0",
+    "@tauri-apps/plugin-opener": "~2.5.3",
+    "@tauri-apps/plugin-os": "~2.3.2",
     "@xyflow/react": "^12.12.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -109,6 +109,5 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^4.1.1"
-  },
-  "packageManager": "yarn@4.12.0"
+  }
 }
