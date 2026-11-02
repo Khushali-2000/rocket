@@ -4,15 +4,15 @@ use std::collections::HashMap;
 
 /// Replaces `{{name}}` inside string literals with the escaped var value.
 pub(crate) fn resolve_script_literals(source: &str, vars: &HashMap<String, String>) -> String {
-    scan(source, &mut |name, quote| {
-        vars.get(name).map(|value| escape_value(value, quote))
+    scan(source, &mut |name| {
+        vars.get(name).map(|value| escape_value(value))
     })
 }
 
 /// True when a `{{process.env.…}}` name sits inside a string literal.
 pub(crate) fn script_names_process_env(source: &str) -> bool {
     let mut found = false;
-    scan(source, &mut |name, _| {
+    scan(source, &mut |name| {
         if name.starts_with("process.env.") {
             found = true;
         }
@@ -30,7 +30,10 @@ enum State {
 }
 
 /// Walks the source once and asks `lookup` for each placeholder inside a string.
-fn scan(source: &str, lookup: &mut dyn FnMut(&str, char) -> Option<String>) -> String {
+///
+/// Regex literals are not lexed, so a quote inside a regex can open a bogus
+/// string. Values are escaped for every string kind, which keeps that safe.
+fn scan(source: &str, lookup: &mut dyn FnMut(&str) -> Option<String>) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
     let mut stack = vec![State::Code(0)];
@@ -60,7 +63,7 @@ fn scan(source: &str, lookup: &mut dyn FnMut(&str, char) -> Option<String>) -> S
                     if let Some(len) = find_close(&chars, i + 2) {
                         let raw: String = chars[i + 2..i + 2 + len].iter().collect();
                         let end = i + 2 + len + 2;
-                        match lookup(raw.trim(), quote) {
+                        match lookup(raw.trim()) {
                             Some(value) => out.push_str(&value),
                             None => out.extend(&chars[i..end]),
                         }
@@ -71,7 +74,7 @@ fn scan(source: &str, lookup: &mut dyn FnMut(&str, char) -> Option<String>) -> S
                 out.push(c);
             }
             Some(State::Line) => {
-                if c == '\n' {
+                if matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
                     stack.pop();
                 }
                 out.push(c);
@@ -125,26 +128,31 @@ fn scan(source: &str, lookup: &mut dyn FnMut(&str, char) -> Option<String>) -> S
     out
 }
 
-/// Finds the length of the name before the first `}}` that starts at `from`.
+/// Finds the length of a placeholder name before the first `}}` from `from`.
+///
+/// Returns `None` when a quote, backtick, backslash or newline comes first.
 fn find_close(chars: &[char], from: usize) -> Option<usize> {
-    (from..chars.len().saturating_sub(1))
-        .find(|&j| chars[j] == '}' && chars[j + 1] == '}')
-        .map(|j| j - from)
+    let mut j = from;
+    while j + 1 < chars.len() {
+        match chars[j] {
+            '}' if chars[j + 1] == '}' => return Some(j - from),
+            '\'' | '"' | '`' | '\\' | '\n' | '\r' => return None,
+            _ => j += 1,
+        }
+    }
+    None
 }
 
-/// Escapes a value so it is safe inside a string with the given quote.
-fn escape_value(value: &str, quote: char) -> String {
-    let chars: Vec<char> = value.chars().collect();
+/// Escapes a value so it is inert inside any kind of JS string.
+fn escape_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    for (i, &c) in chars.iter().enumerate() {
+    for c in value.chars() {
         match c {
-            '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\u{2028}' => out.push_str("\\u2028"),
             '\u{2029}' => out.push_str("\\u2029"),
-            '$' if quote == '`' && chars.get(i + 1) == Some(&'{') => out.push_str("\\$"),
-            c if c == quote => {
+            '\\' | '\'' | '"' | '`' | '$' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -188,7 +196,7 @@ mod tests {
 
     #[test]
     fn value_is_escaped_for_the_quote() {
-        assert_eq!(run("'{{pw}}'"), "'p\"w\\\\\\n'");
+        assert_eq!(run("'{{pw}}'"), "'p\\\"w\\\\\\n'");
         assert_eq!(run("\"{{pw}}\""), "\"p\\\"w\\\\\\n\"");
     }
 
@@ -228,5 +236,61 @@ mod tests {
     fn names_process_env_only_inside_strings() {
         assert!(script_names_process_env("'{{process.env.A}}'"));
         assert!(!script_names_process_env("x({{process.env.A}})"));
+    }
+
+    #[test]
+    fn dollar_before_brace_cannot_open_a_hole() {
+        let mut m = vars();
+        m.insert("v".to_string(), "$".to_string());
+        assert_eq!(resolve_script_literals("`{{v}}{x}`", &m), "`\\${x}`");
+    }
+
+    #[test]
+    fn adjacent_placeholders_stay_inert() {
+        let mut m = vars();
+        m.insert("a".to_string(), "$".to_string());
+        m.insert("b".to_string(), "{evil()}".to_string());
+        assert_eq!(resolve_script_literals("`{{a}}{{b}}`", &m), "`\\${evil()}`");
+    }
+
+    #[test]
+    fn open_braces_without_close_stay() {
+        assert_eq!(run("'{{username'"), "'{{username'");
+    }
+
+    #[test]
+    fn unterminated_string_does_not_panic() {
+        assert_eq!(run("'a {{username}}"), "'a ann");
+    }
+
+    #[test]
+    fn crafted_open_braces_do_not_desync() {
+        let mut m = vars();
+        m.insert("v".to_string(), "ok".to_string());
+        assert_eq!(
+            resolve_script_literals("'{{' ; x = \"{{v}}\"", &m),
+            "'{{' ; x = \"ok\""
+        );
+    }
+
+    #[test]
+    fn regex_quote_keeps_value_inside_the_string() {
+        let mut m = vars();
+        m.insert("v".to_string(), "a\" + evil() + \"".to_string());
+        assert_eq!(
+            resolve_script_literals("/'/.test(s); \"{{v}}\"", &m),
+            "/'/.test(s); \"a\\\" + evil() + \\\"\""
+        );
+    }
+
+    #[test]
+    fn nested_template_hole_with_string_is_resolved() {
+        let s = "`a ${ `b ${ '{{username}}' } c` } {{username}}`";
+        assert_eq!(run(s), "`a ${ `b ${ 'ann' } c` } ann`");
+    }
+
+    #[test]
+    fn line_comment_ends_at_carriage_return() {
+        assert_eq!(run("// x\r'{{username}}'"), "// x\r'ann'");
     }
 }
