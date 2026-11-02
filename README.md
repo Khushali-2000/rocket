@@ -9,6 +9,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Snehal1112/rocket/actions/workflows/release.yml">
+    <img alt="Release" src="https://github.com/Snehal1112/rocket/actions/workflows/release.yml/badge.svg" />
+  </a>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-Tauri_2-orange?logo=rust" />
   <img alt="React" src="https://img.shields.io/badge/React_19-TypeScript-blue?logo=react" />
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Linux_macOS_Windows-green" />
