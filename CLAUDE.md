@@ -10,17 +10,17 @@ A Postman/Insomnia-like HTTP API client desktop app built with Tauri (Rust backe
 
 ```bash
 # Dev
-yarn tauri dev            # full desktop + Vite HMR
-yarn dev                  # frontend only (http://localhost:1420)
+bun run tauri dev            # full desktop + Vite HMR
+bun run dev                  # frontend only (http://localhost:1420)
 
 # Checks
-yarn tsc --noEmit         # TypeScript
-yarn check                # Biome lint + format (read-only)
-yarn lint / yarn format   # auto-fix variants
-yarn test [pattern]       # Vitest
+bun run tsc --noEmit         # TypeScript
+bun run check                # Biome lint + format (read-only)
+bun run lint / bun run format   # auto-fix variants
+bun run test [pattern]       # Vitest
 cargo check -j4            # fast Rust validation
 cargo test -j4 -p <crate> <test_name>
-yarn tauri build          # release build
+bun run tauri build          # release build
 ```
 
 ## Architecture

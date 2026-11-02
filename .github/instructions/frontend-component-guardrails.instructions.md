@@ -33,6 +33,6 @@ Use these rules for [src](../../src).
 
 ## Verification Before Completion
 
-- yarn tsc --noEmit
-- yarn check
-- targeted yarn test when needed
+- bun run tsc --noEmit
+- bun run check
+- targeted bun run test when needed

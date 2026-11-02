@@ -10,15 +10,15 @@ Guidance for AI coding agents working in this repository.
 
 ## Quick Commands
 
-- Full app dev mode: `yarn tauri dev`
-- Frontend-only dev mode: `yarn dev`
-- Type check: `yarn tsc --noEmit`
-- Lint/format check (read-only): `yarn check`
-- Auto-fix lint/format: `yarn lint` and `yarn format`
-- Frontend tests: `yarn test [pattern]`
+- Full app dev mode: `bun run tauri dev`
+- Frontend-only dev mode: `bun run dev`
+- Type check: `bun run tsc --noEmit`
+- Lint/format check (read-only): `bun run check`
+- Auto-fix lint/format: `bun run lint` and `bun run format`
+- Frontend tests: `bun run test [pattern]`
 - Rust validation: `cargo check` or `cargo check -p <crate>`
 - Rust tests: `cargo test` or `cargo test -p <crate> <test_name>`
-- Release build: `yarn tauri build`
+- Release build: `bun run tauri build`
 
 ## Architecture Boundaries
 

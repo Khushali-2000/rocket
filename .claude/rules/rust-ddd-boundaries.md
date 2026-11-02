@@ -30,4 +30,4 @@ If scope includes yml/collection/environment/request/auth/variable-resolution/re
 
 - cargo check
 - focused cargo tests
-- yarn tsc --noEmit for DTO wiring changes
+- bun run tsc --noEmit for DTO wiring changes

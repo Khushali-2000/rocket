@@ -18,5 +18,5 @@
 
 ## Verification
 
-- yarn tsc --noEmit
-- yarn check
+- bun run tsc --noEmit
+- bun run check

@@ -43,4 +43,4 @@ If a Tauri command touches collection/environment data or persistence behavior, 
 
 - cargo check and focused crate checks
 - targeted Rust tests when available
-- yarn tsc --noEmit for DTO/frontend binding changes
+- bun run tsc --noEmit for DTO/frontend binding changes

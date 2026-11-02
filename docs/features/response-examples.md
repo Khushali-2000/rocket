@@ -72,7 +72,7 @@ Known: declarative actions with `scope: request` or `folder` still write variabl
 
 ## Manual check (not run yet)
 
-Needs `yarn tauri dev`.
+Needs `bun run tauri dev`.
 
 1. Send a login request and save `200 OK` as an example. See it nested in the sidebar and open it read-only.
 2. Press Try, edit the copy, send. Check the badge, the disabled Save, Ctrl+S doing nothing, no prompt on close, and the parent request file unchanged.

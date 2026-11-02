@@ -37,6 +37,6 @@ In `src-tauri/src/ipc_acl_tests.rs`:
 
 Not yet run. These need the desktop app, so they cannot run in CI.
 
-- [ ] `yarn tauri dev`: the app starts. Collections list, a request runs, the environment editor saves and the git panel loads, with no "not allowed" errors in the console.
-- [ ] `yarn tauri dev`: OAuth 2 authorization code with the embedded window (system browser off) completes sign-in and stores a token.
-- [ ] `yarn tauri build`: the release app starts and runs one request. Release origins differ from dev (`tauri://localhost` vs `http://localhost:1420`).
+- [ ] `bun run tauri dev`: the app starts. Collections list, a request runs, the environment editor saves and the git panel loads, with no "not allowed" errors in the console.
+- [ ] `bun run tauri dev`: OAuth 2 authorization code with the embedded window (system browser off) completes sign-in and stores a token.
+- [ ] `bun run tauri build`: the release app starts and runs one request. Release origins differ from dev (`tauri://localhost` vs `http://localhost:1420`).

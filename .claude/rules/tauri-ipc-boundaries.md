@@ -40,4 +40,4 @@ If command changes touch collections/environments or persistence behavior, inclu
 
 - cargo check and focused checks
 - targeted Rust tests
-- yarn tsc --noEmit for DTO/frontend binding changes
+- bun run tsc --noEmit for DTO/frontend binding changes

@@ -92,7 +92,7 @@ Moved folders:
 
 Automated tests cannot see the real window. The user runs these. Do not tick them on the user's behalf.
 
-Run `yarn tauri dev`. In a throwaway collection make a folder `outer` that holds a folder `inner`, and a request `ping` in `inner` that points at an echo endpoint (for example `https://httpbin.org/anything`).
+Run `bun run tauri dev`. In a throwaway collection make a folder `outer` that holds a folder `inner`, and a request `ping` in `inner` that points at an echo endpoint (for example `https://httpbin.org/anything`).
 
 Tab basics:
 - [ ] Click folder `outer`. A Folder Settings tab opens with Headers, Script, Test, Vars, Auth and Docs. The chevron still expands and collapses without opening a tab. The folder menu has Settings.

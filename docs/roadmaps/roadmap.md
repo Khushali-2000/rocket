@@ -142,7 +142,7 @@ Shipped on local main (not pushed). Details in `docs/features/collection-trust.m
 | ID | Item | Status | Where | What remains |
 |---|---|---|---|---|
 | R-56 | Assistant folder tools: `get_folder_settings` read tool and `UpdateFolderSettings` proposal (headers, variables, scripts, docs; never auth) | done (on local main, not pushed; `4b3bb1cd` to `dd639d7e`, final Opus review ready to merge) | spec `specs/2026-10-11-assistant-folder-tools-design.md`, plans `plans/assistant-folder-tools/`, notes in `docs/features/folder-settings.md` | Follow-ups in `assistant-followups.md`: lost-update window in apply, parse-failure error names no folder, secret flag lost on re-propose, brief dirty-flag carry-over on a folder switch, two missing tool-server tests. |
-| R-57 | `yarn test` flakes on 5000 ms timeouts when the whole suite runs in parallel | open | a full run fails 14 to 16 different files each time; every file passes alone or with `--maxWorkers=2` | Raise `testTimeout` in the Vitest config or cap the workers. Small. |
+| R-57 | `bun run test` flakes on 5000 ms timeouts when the whole suite runs in parallel | open | a full run fails 14 to 16 different files each time; every file passes alone or with `--maxWorkers=2` | Raise `testTimeout` in the Vitest config or cap the workers. Small. |
 | R-58 | Agent edits of folder auth | open | deliberately out of scope of R-56 | Needs the user's security decision first. |
 | R-59 | Tidy-ups from the tool reviews: `cargo fmt` once over the workspace, `/kb-refresh rocketapi`, mark follow-up rows in `assistant-followups.md` | open | | Small, separate commits. |
 | R-60 | Software factory v3 series (plans 01 to 08): Rust driver with `git2`, headless agents, checks before review, risk gate, budget, series, dashboard tokens, harness and verification | built on branch `factory-v3/plan-08-verification`; dry run pending (user) | spec `docs/superpowers/specs/2026-10-13-software-factory-v3-rust-driver-design.md`, plans `docs/superpowers/plans/2026-10-13-software-factory-v3/`, design doc `~/data/rocket/Archive/rocket-tools-factory/software-factory.md` | Run the dry run recipe in `~/data/rocket/Archive/rocket-tools-factory/software-factory.md`, compare `factory tokens` with the job 001 baseline, then merge. Open follow-ups are in its open items list. |
@@ -151,7 +151,7 @@ Shipped on local main (not pushed). Details in `docs/features/collection-trust.m
 
 | ID | Item | Status | Where | What remains |
 |---|---|---|---|---|
-| R-71 | App command ACL: app commands callable only from the local page in the `main` window (the OAuth 2 window gets none) | done (`ac3caae5`) | `src-tauri/app-commands.txt`, `build.rs`, `capabilities/default.json`, `src-tauri/src/ipc_acl_tests.rs`; `docs/features/ipc-command-acl.md` | Manual checks in the doc are not yet run (need `yarn tauri dev` and `yarn tauri build`). |
+| R-71 | App command ACL: app commands callable only from the local page in the `main` window (the OAuth 2 window gets none) | done (`ac3caae5`) | `src-tauri/app-commands.txt`, `build.rs`, `capabilities/default.json`, `src-tauri/src/ipc_acl_tests.rs`; `docs/features/ipc-command-acl.md` | Manual checks in the doc are not yet run (need `bun run tauri dev` and `bun run tauri build`). |
 
 ## 8f. Settings page, Bruno parity (2026-10-31)
 

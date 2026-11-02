@@ -45,4 +45,4 @@ Trigger list: yml, collection/environment/request/auth, variable resolution/scop
 
 - cargo check for changed crates
 - focused cargo tests
-- yarn tsc --noEmit when DTO wiring changes
+- bun run tsc --noEmit when DTO wiring changes

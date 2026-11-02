@@ -91,7 +91,7 @@ Goal: prove that a request fails without the certificate and succeeds with it.
 
 ### A1. The request fails first
 
-1. Start Rocket: `yarn tauri dev`.
+1. Start Rocket: `bun run tauri dev`.
 2. Create a request.
    - Method: GET
    - URL: `https://127.0.0.1:9443/`

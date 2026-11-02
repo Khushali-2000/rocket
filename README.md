@@ -83,8 +83,8 @@ Measured on the same Linux machine on 2026-10-21 with the installed builds:
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 18+
-- [Yarn](https://yarnpkg.com/)
+- [Node.js](https://nodejs.org/) 22+
+- [Bun](https://bun.sh/)
 - [Rust](https://www.rust-lang.org/tools/install) (stable toolchain)
 - Tauri 2 system dependencies ([see guide](https://v2.tauri.app/start/prerequisites/))
 
@@ -92,36 +92,36 @@ Measured on the same Linux machine on 2026-10-21 with the installed builds:
 
 ```bash
 # Install frontend dependencies
-yarn install
+bun install
 
 # Full Tauri dev mode (launches desktop window + Vite HMR)
-yarn tauri dev
+bun run tauri dev
 
 # Frontend only (Vite server at http://localhost:1420)
-yarn dev
+bun run dev
 ```
 
 ### Build
 
 ```bash
 # Production build
-yarn tauri build
+bun run tauri build
 
 # Frontend only
-yarn build
+bun run build
 ```
 
 ### Checks
 
 ```bash
 # TypeScript
-yarn tsc --noEmit
+bun run tsc --noEmit
 
 # Rust
 cargo check -j4
 
 # Frontend tests
-yarn test
+bun run test
 
 # Rust tests (target a crate; avoid --workspace)
 cargo test -j4 -p <crate>

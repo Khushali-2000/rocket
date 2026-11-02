@@ -31,8 +31,8 @@ Scope argument: $ARGUMENTS
 - Never run a workspace-wide build or test, and never leave out `-j4`. The harness guard denies both.
 
 4. For frontend or all, run from repo root:
-- yarn tsc --noEmit
-- yarn check
+- bun run tsc --noEmit
+- bun run check
 
 5. Report output in a strict table, one row per command that ran:
 
@@ -40,8 +40,8 @@ Scope argument: $ARGUMENTS
 |---|---|---|
 | cargo check -j4 -p <crate> | pass/fail | error count or key failure line |
 | cargo test -j4 -p <crate> --no-run | pass/fail | error count or key failure line |
-| yarn tsc --noEmit | pass/fail | error count or key failure line |
-| yarn check | pass/fail | error count or key failure line |
+| bun run tsc --noEmit | pass/fail | error count or key failure line |
+| bun run check | pass/fail | error count or key failure line |
 
 6. If any check fails:
 - Include relevant raw error snippets.

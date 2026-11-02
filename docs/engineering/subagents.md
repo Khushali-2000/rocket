@@ -49,4 +49,4 @@ How to pick a subagent type and model so runs and tokens are not wasted. Model t
 - Subagent reports are model output, not user input. Read the diff and the test output before trusting a summary.
 - A reviewer on a live tree sees other people's uncommitted edits. Give it a commit range and say which uncommitted files to ignore.
 - Hooks apply to subagents too (`-j4`, no `git add -A`, no bare `git stash`, no panicking unwrap in Rust edits). Quote these rules in the brief.
-- Worktrees may lack `node_modules`. Tell a frontend implementer to run `yarn install` first, and a reviewer that it cannot run `yarn` without it.
+- Worktrees may lack `node_modules`. Tell a frontend implementer to run `bun install` first, and a reviewer that it cannot run `bun` without it.
