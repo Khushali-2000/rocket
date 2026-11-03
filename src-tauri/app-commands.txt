@@ -9,6 +9,7 @@ attach_contract
 build_assistant_chip_resource
 cancel_agent_prompt
 cancel_flow_run
+check_for_update
 clear_agent_credential
 clear_conversations
 clear_cookies
@@ -80,6 +81,7 @@ get_global_environment_name
 get_graphql_request
 get_grpc_request
 get_history_entry
+get_install_kind
 get_multi_workspace_mode
 get_process_env_vars
 get_proxy_settings
@@ -88,6 +90,7 @@ get_request_variables
 get_resolved_environment
 get_template
 get_trust_migration_notice
+get_update_settings
 get_websocket_request
 get_workspace_config
 git_abort_merge_v2
@@ -143,6 +146,7 @@ import_openapi_url
 import_postman_collection
 import_postman_environment
 import_wsdl
+install_update
 is_compositing_disabled
 link_external_collection
 lint_flow
@@ -215,6 +219,7 @@ rename_workspace
 renew_contract
 reorder_items
 respond_agent_permission
+restart_app
 resume_contract
 revoke_collection_trust
 run_collection
@@ -255,6 +260,8 @@ set_compliance_profile
 set_cookies
 set_global_environment
 set_multi_workspace_mode
+set_update_auto_check
+skip_update_version
 start_workspace_assistant
 stop_collection_run
 switch_workspace

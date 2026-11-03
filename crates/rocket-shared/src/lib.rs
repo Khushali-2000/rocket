@@ -12,6 +12,7 @@ pub mod paths;
 pub mod proxy;
 pub mod run_source;
 pub mod types;
+pub mod update_settings;
 pub mod validation;
 pub mod variable_value;
 

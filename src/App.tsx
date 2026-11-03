@@ -14,10 +14,12 @@ import { PaneRenderer } from '@/components/panes/PaneRenderer';
 import { SplashScreen } from '@/components/SplashScreen';
 import { TitleBar } from '@/components/title-bar';
 import { Toaster } from '@/components/ui/sonner';
+import { UpdateDialog } from '@/components/updates/UpdateDialog';
 import { useBackendLogs } from '@/hooks/useBackendLogs';
 import { useFileWatcherFailed } from '@/hooks/useFileWatcherFailed';
 import { useFlowRequestPathEvents } from '@/hooks/useFlowRequestPathEvents';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useUpdateNotice } from '@/hooks/useUpdateNotice';
 import { useAssistantEventBridge } from '@/lib/assistant-event-bridge';
 import { useGraphQlSubscriptionEventBridge } from '@/lib/graphql-subscription-event-bridge';
 import {
@@ -61,6 +63,7 @@ function App() {
   useGraphQlSubscriptionEventBridge();
   useBackendLogs();
   useFileWatcherFailed();
+  useUpdateNotice();
   useCollectionTrustEvents();
   useFlowRequestPathEvents();
 
@@ -287,6 +290,7 @@ function App() {
       {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
       <Toaster position='bottom-right' />
       <TrustMigrationNotice />
+      <UpdateDialog />
       <OpenApiSyncNotifier />
     </div>
   );

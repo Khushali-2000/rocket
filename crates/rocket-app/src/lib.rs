@@ -84,6 +84,7 @@ mod session_plan;
 pub mod template_service;
 #[cfg(test)]
 pub(crate) mod test_doubles;
+pub mod update_service;
 pub(crate) mod vault_certificates;
 pub mod vault_secret_resolution;
 pub mod websocket_service;
@@ -184,6 +185,9 @@ pub use session_plan::{
     NON_CLAUDE_TOOL_NOTICE, ROCKET_MCP_TOOL_NAMES,
 };
 pub use template_service::TemplateService;
+pub use update_service::{
+    is_newer, release_url, should_announce, UpdateService, UpdateSettings, UpdateSettingsRepository,
+};
 pub use vault_secret_resolution::resolve_vault_secret_value;
 pub use websocket_service::WebSocketService;
 pub use workspace_service::WorkspaceService;

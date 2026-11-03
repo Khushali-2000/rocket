@@ -508,6 +508,9 @@ pub fn run() {
                 Arc::new(rocket_infra::KeyringSecretStore::new_proxy()),
                 Arc::clone(&shared_proxy),
             );
+            let update_svc = rocket_app::UpdateService::new(Box::new(
+                rocket_infra::FsUpdateSettingsRepo::new(data_dir.join("update.yml")),
+            ));
             let executor: Arc<dyn rocket_http::HttpExecutor> = Arc::new(
                 ReqwestExecutor::with_allowed_base(Arc::clone(&active_workspace_path))
                     // The jar is read on every request and pinned once per response, so
@@ -905,6 +908,7 @@ pub fn run() {
             app.manage(template_svc);
             app.manage(cookie_svc);
             app.manage(proxy_svc);
+            app.manage(update_svc);
             app.manage(exec_svc);
             app.manage(rocket_app::graphql_schema::GraphQlSchemaCache::default());
             app.manage(secret_manager_svc);
@@ -934,6 +938,8 @@ pub fn run() {
             // through the normal exit path, which kills every agent session.
             #[cfg(unix)]
             spawn_exit_signal_listener(app.handle().clone());
+
+            commands::updates::start_update_checker(app.handle());
 
             // Start filesystem watcher for the collections directory.
             let watcher_started = std::time::Instant::now();
@@ -1101,6 +1107,13 @@ pub fn run() {
             commands::cookies::clear_cookies,
             commands::proxy::get_proxy_settings,
             commands::proxy::save_proxy_settings,
+            commands::updates::check_for_update,
+            commands::updates::get_install_kind,
+            commands::updates::get_update_settings,
+            commands::updates::install_update,
+            commands::updates::restart_app,
+            commands::updates::set_update_auto_check,
+            commands::updates::skip_update_version,
             commands::app::get_app_data_dir,
             commands::app::is_compositing_disabled,
             commands::audit::list_audit_events,
@@ -1272,40 +1285,45 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                if let Some(slot) = app_handle.try_state::<commands::import::SyncSchedulerSlot>() {
-                    slot.stop();
-                }
-                if let Some(acp_session_svc) =
-                    app_handle.try_state::<rocket_app::AcpSessionService>()
-                {
-                    // Best-effort on app exit. The process is about to tear
-                    // down regardless, so there is no caller left to report
-                    // a kill failure to.
-                    let _ = tauri::async_runtime::block_on(acp_session_svc.end_all_sessions());
-                }
-                if let Some(websocket_svc) = app_handle.try_state::<rocket_app::WebSocketService>() {
-                    tauri::async_runtime::block_on(websocket_svc.end_all_sessions());
-                }
-                if let Some(svc) = app_handle.try_state::<rocket_app::GraphQlSubscriptionService>() {
-                    tauri::async_runtime::block_on(svc.end_all());
-                }
-                if let Some(grpc_svc) = app_handle.try_state::<rocket_app::GrpcService>() {
-                    // Best-effort, like the ACP cleanup: the process is about to end.
-                    grpc_svc.end_all();
-                }
-                if let Some(mcp_registry) =
-                    app_handle.try_state::<Arc<mcp::registry::McpServerRegistry>>()
-                {
-                    mcp_registry.shutdown_all();
-                }
-                if let Some(resources) =
-                    app_handle.try_state::<Arc<agent_session::cleanup::SessionResourceRegistry>>()
-                {
-                    // Backstop for a session that started while end_all_sessions ran.
-                    resources.clear_all();
-                }
+                shutdown_services(app_handle);
             }
         });
+}
+
+/// Stops the services that must not outlive the app: the sync scheduler, ACP agents,
+/// WebSocket, GraphQL and gRPC sessions, and MCP servers.
+///
+/// Runs on `RunEvent::Exit` and before an update install. It blocks, so call it
+/// from a plain thread and not from async code.
+pub(crate) fn shutdown_services(app_handle: &tauri::AppHandle) {
+    if let Some(slot) = app_handle.try_state::<commands::import::SyncSchedulerSlot>() {
+        slot.stop();
+    }
+    if let Some(acp_session_svc) = app_handle.try_state::<rocket_app::AcpSessionService>() {
+        // Best-effort on app exit. The process is about to tear
+        // down regardless, so there is no caller left to report
+        // a kill failure to.
+        let _ = tauri::async_runtime::block_on(acp_session_svc.end_all_sessions());
+    }
+    if let Some(websocket_svc) = app_handle.try_state::<rocket_app::WebSocketService>() {
+        tauri::async_runtime::block_on(websocket_svc.end_all_sessions());
+    }
+    if let Some(svc) = app_handle.try_state::<rocket_app::GraphQlSubscriptionService>() {
+        tauri::async_runtime::block_on(svc.end_all());
+    }
+    if let Some(grpc_svc) = app_handle.try_state::<rocket_app::GrpcService>() {
+        // Best-effort, like the ACP cleanup: the process is about to end.
+        grpc_svc.end_all();
+    }
+    if let Some(mcp_registry) = app_handle.try_state::<Arc<mcp::registry::McpServerRegistry>>() {
+        mcp_registry.shutdown_all();
+    }
+    if let Some(resources) =
+        app_handle.try_state::<Arc<agent_session::cleanup::SessionResourceRegistry>>()
+    {
+        // Backstop for a session that started while end_all_sessions ran.
+        resources.clear_all();
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
