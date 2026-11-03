@@ -12,6 +12,8 @@ A collection file only requests elevated access. `~/.rocket-api/trust.yml` holds
 | Extra script folders | `additionalContextRoots` | `require()` roots, per approved root |
 | Agent request runs | `agentAutonomyEnabled: true` | Assistant `run_request`, ACP MCP servers |
 | Host environment | none (implicit) | `{{process.env.NAME}}` on every protocol |
+| RocketVault values | none (implicit), grant-only | `{{alias.secret}}` placeholders |
+| RocketVault certificates | none (implicit), grant-only | Vault client certificates |
 
 ## Rules
 
@@ -19,6 +21,20 @@ A collection file only requests elevated access. `~/.rocket-api/trust.yml` holds
 - `save_collection_settings` never grants and keeps the three file fields as they are. Only `CollectionTrustService` writes capabilities.
 - The banner approves with the fingerprint the user saw (`grant_requested_capabilities`). Freeze it when the review opens.
 - Services built without a trust store deny everything (`DenyAllTrustStore`). Tests that need access use `InMemoryTrustStore::allow_all()`.
+
+## RocketVault (`{{alias.secret}}` and vault certificates)
+
+Spec: `docs/superpowers/specs/2026-11-05-rocketvault-trust-gate-design.md` (the Addendum overrides earlier text).
+
+- Who has it: existing collections (grandfathered) and collections Rocket creates. Clones and imports do not, until the user allows the switch in the collection's trust settings.
+- Gate position: the vault fetch itself. A denied collection never reaches the keychain or the vault, so there is no keychain read and no network call.
+- Denied values: the placeholder stays unresolved and the Console shows one warning.
+- Denied certificates: a selected vault certificate fails the send with "RocketVault certificates are not allowed for this collection". OAuth2 token requests and Flow auth nodes follow the same rule.
+- Not gated: the app-global agent credential and the names listing. Scratch requests keep access.
+- Warning detection covers request templates (URL, headers, query, body, path params, auth fields) and Flow Input text. It does not see text a script writes or `rok.getSecretVar` reads.
+- Known limit: a collection allowed vault access can still send vault values to any host its requests name.
+
+Manual check: clone a collection with a vault binding and send a request. Confirm the Console warning and the unresolved text. Allow the switch in the collection's trust settings, send again and confirm the value resolves.
 
 ## Host environment (`{{process.env.*}}`)
 

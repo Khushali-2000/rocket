@@ -438,6 +438,7 @@ interface CollectionTrustDto {
 - **Safe mode still has the network.** `rok.sendRequest` and `rok.runRequest` work in Safe mode
   (2026-10-07 addendum). An untrusted collection's script can send environment values, RocketVault
   values and response data to any host. Host environment variables are now withheld from it.
+  Update: the RocketVault trust gate shipped (`2026-11-05-rocketvault-trust-gate-design.md`).
 - **Requests send what they reference.** A pulled request can point at a new host while using
   `{{apiToken}}` from the user's environment. The gate does not inspect request content. The user
   sees the URL before sending; the scanner and request-guard work are the later aids.

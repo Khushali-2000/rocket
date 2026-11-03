@@ -12,6 +12,8 @@ export function makeTrust(overrides: Partial<CollectionTrust> = {}): CollectionT
     contextRoots: { requested: [], granted: [], effective: [], pending: [] },
     agentRun: off,
     processEnv: { granted: false },
+    vaultValues: { granted: false },
+    vaultCertificates: { granted: false },
     pending: false,
     fingerprint: 'fp-1',
     storeError: null,

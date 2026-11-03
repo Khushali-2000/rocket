@@ -205,6 +205,50 @@ export function CollectionTrustSection({ collection }: CollectionTrustSectionPro
               </Button>
             </TableCell>
           </TableRow>
+          <TableRow>
+            <TableCell>RocketVault values ({'{{alias.secret}}'})</TableCell>
+            <TableCell>If a request uses it</TableCell>
+            <TableCell>{yesNo(trust.vaultValues.granted)}</TableCell>
+            <TableCell className='text-right'>
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() =>
+                  trust.vaultValues.granted
+                    ? setCap('vaultValues', false)
+                    : setConfirm({
+                        title: 'Allow RocketVault values on this computer?',
+                        note: '',
+                        run: () => setCap('vaultValues', true),
+                      })
+                }
+              >
+                {trust.vaultValues.granted ? 'Revoke' : 'Allow...'}
+              </Button>
+            </TableCell>
+          </TableRow>
+          <TableRow>
+            <TableCell>RocketVault certificates</TableCell>
+            <TableCell>If a request uses it</TableCell>
+            <TableCell>{yesNo(trust.vaultCertificates.granted)}</TableCell>
+            <TableCell className='text-right'>
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() =>
+                  trust.vaultCertificates.granted
+                    ? setCap('vaultCertificates', false)
+                    : setConfirm({
+                        title: 'Allow RocketVault certificates on this computer?',
+                        note: '',
+                        run: () => setCap('vaultCertificates', true),
+                      })
+                }
+              >
+                {trust.vaultCertificates.granted ? 'Revoke' : 'Allow...'}
+              </Button>
+            </TableCell>
+          </TableRow>
         </TableBody>
       </Table>
       <div>
@@ -215,7 +259,7 @@ export function CollectionTrustSection({ collection }: CollectionTrustSectionPro
             setConfirm({
               title: 'Forget all permissions of this collection?',
               description:
-                'This removes every permission above, including host environment access. The collection file is not changed.',
+                'This removes every permission above, including host environment access, RocketVault values and RocketVault certificates. The collection file is not changed.',
               note: '',
               confirmLabel: 'Forget',
               run: () => revokeAll.mutate(undefined, clearErrors),

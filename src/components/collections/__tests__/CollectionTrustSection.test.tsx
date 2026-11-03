@@ -86,6 +86,61 @@ describe('CollectionTrustSection', () => {
     await waitFor(() => expect(tauriApi.revokeCollectionTrust).toHaveBeenCalledWith('c'));
   });
 
+  it('shows the RocketVault rows with their allowed state', async () => {
+    vi.mocked(tauriApi.getCollectionTrust).mockResolvedValue(
+      makeTrust({ vaultValues: { granted: true }, vaultCertificates: { granted: false } }),
+    );
+    renderWithQuery(<CollectionTrustSection collection='c' />);
+    const values = await screen.findByRole('row', { name: /RocketVault values/ });
+    expect(within(values).getByRole('button', { name: 'Revoke' })).toBeInTheDocument();
+    const certs = screen.getByRole('row', { name: /RocketVault certificates/ });
+    expect(within(certs).getByRole('button', { name: 'Allow...' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['vaultValues', /RocketVault values/],
+    ['vaultCertificates', /RocketVault certificates/],
+  ] as const)('allows %s after confirming and revokes it directly', async (cap, name) => {
+    vi.mocked(tauriApi.getCollectionTrust).mockResolvedValue(makeTrust());
+    renderWithQuery(<CollectionTrustSection collection='c' />);
+    const user = userEvent.setup();
+    await user.click(
+      within(await screen.findByRole('row', { name })).getByRole('button', { name: 'Allow...' }),
+    );
+    expect(tauriApi.setCollectionCapability).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('button', { name: 'Allow' }));
+    await waitFor(() =>
+      expect(tauriApi.setCollectionCapability).toHaveBeenCalledWith('c', cap, true),
+    );
+  });
+
+  it.each([
+    ['vaultValues', /RocketVault values/],
+    ['vaultCertificates', /RocketVault certificates/],
+  ] as const)('revokes %s without a dialog', async (cap, name) => {
+    vi.mocked(tauriApi.getCollectionTrust).mockResolvedValue(
+      makeTrust({ [cap]: { granted: true } }),
+    );
+    renderWithQuery(<CollectionTrustSection collection='c' />);
+    const user = userEvent.setup();
+    await user.click(
+      within(await screen.findByRole('row', { name })).getByRole('button', { name: 'Revoke' }),
+    );
+    await waitFor(() =>
+      expect(tauriApi.setCollectionCapability).toHaveBeenCalledWith('c', cap, false),
+    );
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('mentions RocketVault in the forget-all dialog', async () => {
+    vi.mocked(tauriApi.getCollectionTrust).mockResolvedValue(makeTrust());
+    renderWithQuery(<CollectionTrustSection collection='c' />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Forget this collection/ }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText(/RocketVault values and RocketVault certificates/)).toBeInTheDocument();
+  });
+
   it('marks a pending root', async () => {
     vi.mocked(tauriApi.getCollectionTrust).mockResolvedValue(
       makeTrust({

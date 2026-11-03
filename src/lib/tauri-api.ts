@@ -1036,7 +1036,12 @@ export const saveCollectionSettings = (collection: string, settings: Partial<Col
   invoke<void>('save_collection_settings', { collection, settings });
 
 /** Capabilities a user can switch for a collection on this computer. */
-export type CollectionCapability = 'developerMode' | 'agentRun' | 'processEnv';
+export type CollectionCapability =
+  | 'developerMode'
+  | 'agentRun'
+  | 'processEnv'
+  | 'vaultValues'
+  | 'vaultCertificates';
 
 /** Capabilities the trust banner can approve as the collection file requests them. */
 export type RequestedCapability = 'developerMode' | 'contextRoots' | 'agentRun';
@@ -1060,6 +1065,8 @@ export interface CollectionTrust {
   };
   agentRun: CapabilityState;
   processEnv: { granted: boolean };
+  vaultValues: { granted: boolean };
+  vaultCertificates: { granted: boolean };
   /** Any capability is requested and not granted. */
   pending: boolean;
   /** Identifies the request that was shown, for `grantRequestedCapabilities`. */
