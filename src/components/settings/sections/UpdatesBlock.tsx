@@ -112,7 +112,7 @@ export function UpdatesBlock() {
           {check === 'checking' ? 'Checking...' : 'Check now'}
         </Button>
       </div>
-      {check === 'latest' && (
+      {check === 'latest' && !available && (
         <span className='text-muted-foreground'>You are on the latest version</span>
       )}
       {saveFailed && <span className='text-destructive'>Could not save the setting.</span>}

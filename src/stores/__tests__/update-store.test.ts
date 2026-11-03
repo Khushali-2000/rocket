@@ -18,6 +18,22 @@ describe('update store', () => {
     sonner.error.mockReset();
   });
 
+  it('clearing the update resets an error state', () => {
+    state().setAvailable(info);
+    state().setStatus('error');
+    state().setError('boom');
+    state().setAvailable(null);
+    expect(state().status).toBe('idle');
+    expect(state().error).toBeNull();
+  });
+
+  it('clearing the update keeps a running download status', () => {
+    state().setAvailable(info);
+    state().setStatus('downloading');
+    state().setAvailable(null);
+    expect(state().status).toBe('downloading');
+  });
+
   it('has the expected initial state', () => {
     expect(state().available).toBeNull();
     expect(state().installKind).toBe('selfUpdatable');

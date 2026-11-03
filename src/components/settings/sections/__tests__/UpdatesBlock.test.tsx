@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const api = vi.hoisted(() => ({
@@ -125,6 +125,7 @@ describe('UpdatesBlock', () => {
     fireEvent.click(sw);
     fireEvent.click(sw);
     fail(new Error('no'));
+    await act(async () => {});
     await waitFor(() => expect(api.setUpdateAutoCheck).toHaveBeenCalledTimes(2));
     expect(sw.getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByText('Could not save the setting.')).toBeNull();
@@ -139,6 +140,18 @@ describe('UpdatesBlock', () => {
     expect(state().available).toBeNull();
   });
 
+  it('the latest line is hidden while an update row shows', async () => {
+    api.checkForUpdate.mockResolvedValue(null);
+    state().setAvailable(info);
+    state().setStatus('downloading');
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Check now' })).toHaveProperty('disabled', false),
+    );
+    expect(screen.queryByText('You are on the latest version')).toBeNull();
+  });
+
   it('a null check keeps the update while downloading or ready', async () => {
     api.checkForUpdate.mockResolvedValue(null);
     for (const st of ['downloading', 'ready'] as const) {
@@ -147,7 +160,9 @@ describe('UpdatesBlock', () => {
       state().setStatus(st);
       const { unmount } = render(<UpdatesBlock />);
       fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
-      expect(await screen.findByText('You are on the latest version')).toBeTruthy();
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Check now' })).toHaveProperty('disabled', false),
+      );
       expect(state().available).toEqual(info);
       expect(state().status).toBe(st);
       unmount();

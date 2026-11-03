@@ -39,7 +39,13 @@ const initialState = {
 // State of the update notice. It is not saved.
 export const useUpdateStore = create<UpdateState>()((set) => ({
   ...initialState,
-  setAvailable: (available) => set({ available }),
+  setAvailable: (available) =>
+    set((s) =>
+      // Clearing the update also clears an error, so the next update starts clean.
+      available === null && s.status === 'error'
+        ? { available, status: 'idle', error: null }
+        : { available },
+    ),
   setInstallKind: (installKind) => set({ installKind }),
   setProgress: (progress) => set({ progress }),
   setStatus: (status) => set({ status }),
