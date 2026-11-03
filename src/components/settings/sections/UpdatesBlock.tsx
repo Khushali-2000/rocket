@@ -1,9 +1,9 @@
 import { getVersion } from '@tauri-apps/api/app';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { openRelease } from '@/components/updates/UpdateToast';
+import { isWindows, openRelease, WindowsCloseNote } from '@/components/updates/UpdateToast';
 import { checkForUpdate, getUpdateSettings, restartApp, setUpdateAutoCheck } from '@/lib/tauri-api';
 import { installAvailableUpdate, useUpdateStore } from '@/stores/update-store';
 
@@ -17,7 +17,17 @@ export function UpdatesBlock() {
   const [current, setCurrent] = useState<string | null>(null);
   const [autoCheck, setAutoCheck] = useState<boolean | null>(null);
   const [check, setCheck] = useState<CheckState>('idle');
+  const [saveFailed, setSaveFailed] = useState(false);
+  const autoCheckRef = useRef<boolean | null>(null);
+  const mounted = useRef(true);
   const manual = installKind === 'manual';
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -26,7 +36,11 @@ export function UpdatesBlock() {
       () => !disposed && setCurrent(null),
     );
     getUpdateSettings().then(
-      (s) => !disposed && setAutoCheck(s.autoCheck),
+      (s) => {
+        if (disposed) return;
+        autoCheckRef.current = s.autoCheck;
+        setAutoCheck(s.autoCheck);
+      },
       () => !disposed && setAutoCheck(null),
     );
     return () => {
@@ -35,9 +49,20 @@ export function UpdatesBlock() {
   }, []);
 
   const onToggle = (next: boolean) => {
-    const previous = autoCheck;
+    // The previous value is read at click time, so a late failure cannot restore a stale one.
+    const previous = autoCheckRef.current;
+    autoCheckRef.current = next;
     setAutoCheck(next);
-    setUpdateAutoCheck(next).catch(() => setAutoCheck(previous));
+    setUpdateAutoCheck(next).then(
+      () => mounted.current && setSaveFailed(false),
+      () => {
+        // A newer toggle owns the value now, so only undo when none came after this one.
+        if (!mounted.current || autoCheckRef.current !== next) return;
+        autoCheckRef.current = previous;
+        setAutoCheck(previous);
+        setSaveFailed(true);
+      },
+    );
   };
 
   const onCheck = async () => {
@@ -47,12 +72,15 @@ export function UpdatesBlock() {
       const info = await checkForUpdate();
       if (info) {
         useUpdateStore.getState().setAvailable(info);
-        setCheck('idle');
+        if (mounted.current) setCheck('idle');
       } else {
-        setCheck('latest');
+        // A running or finished download keeps its update.
+        const { status: now, setAvailable } = useUpdateStore.getState();
+        if (now === 'idle' || now === 'error') setAvailable(null);
+        if (mounted.current) setCheck('latest');
       }
     } catch {
-      setCheck('failed');
+      if (mounted.current) setCheck('failed');
     }
   };
 
@@ -84,10 +112,12 @@ export function UpdatesBlock() {
           {check === 'checking' ? 'Checking...' : 'Check now'}
         </Button>
       </div>
-      {check === 'latest' && !available && (
+      {check === 'latest' && (
         <span className='text-muted-foreground'>You are on the latest version</span>
       )}
+      {saveFailed && <span className='text-destructive'>Could not save the setting.</span>}
       {check === 'failed' && <span className='text-destructive'>Could not check for updates.</span>}
+      {available && !manual && status === 'idle' && isWindows() && <WindowsCloseNote />}
       {available && (
         <div className='flex flex-wrap items-center gap-2'>
           {status === 'ready' ? (

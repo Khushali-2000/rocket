@@ -13,7 +13,8 @@ const app = vi.hoisted(() => ({ getVersion: vi.fn() }));
 vi.mock('@/lib/tauri-api', () => api);
 vi.mock('sonner', () => ({ toast: sonner }));
 vi.mock('@tauri-apps/api/app', () => app);
-vi.mock('@tauri-apps/plugin-os', () => ({ platform: vi.fn(() => 'linux') }));
+const os = vi.hoisted(() => ({ platform: vi.fn() }));
+vi.mock('@tauri-apps/plugin-os', () => os);
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
 vi.mock('@/stores/update-store', async () => {
   const actual = await vi.importActual<typeof import('@/stores/update-store')>(
@@ -34,6 +35,7 @@ describe('UpdatesBlock', () => {
     for (const m of [...Object.values(api), ...Object.values(flow), ...Object.values(sonner)]) {
       m.mockReset();
     }
+    os.platform.mockReset().mockReturnValue('linux');
     app.getVersion.mockReset().mockResolvedValue('2.1.0');
     api.getUpdateSettings.mockResolvedValue({ autoCheck: true, skippedVersion: null });
     api.setUpdateAutoCheck.mockResolvedValue(undefined);
@@ -96,5 +98,87 @@ describe('UpdatesBlock', () => {
     render(<UpdatesBlock />);
     fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
     expect(await screen.findByText(/Rocket 2\.2\.0 is available/)).toBeTruthy();
+  });
+
+  it('rolls the switch back and shows a message when saving fails', async () => {
+    api.setUpdateAutoCheck.mockRejectedValue(new Error('no'));
+    render(<UpdatesBlock />);
+    const sw = await screen.findByRole('switch');
+    await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'));
+    fireEvent.click(sw);
+    expect(await screen.findByText('Could not save the setting.')).toBeTruthy();
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    api.setUpdateAutoCheck.mockResolvedValue(undefined);
+    fireEvent.click(sw);
+    await waitFor(() => expect(screen.queryByText('Could not save the setting.')).toBeNull());
+    expect(sw.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('a late failure of an older toggle does not restore a stale value', async () => {
+    let fail: (e: Error) => void = () => undefined;
+    api.setUpdateAutoCheck
+      .mockReturnValueOnce(new Promise<void>((_, rej) => (fail = rej)))
+      .mockResolvedValueOnce(undefined);
+    render(<UpdatesBlock />);
+    const sw = await screen.findByRole('switch');
+    await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'));
+    fireEvent.click(sw);
+    fireEvent.click(sw);
+    fail(new Error('no'));
+    await waitFor(() => expect(api.setUpdateAutoCheck).toHaveBeenCalledTimes(2));
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByText('Could not save the setting.')).toBeNull();
+  });
+
+  it('a null check clears a stale idle update and says latest', async () => {
+    state().setAvailable(info);
+    api.checkForUpdate.mockResolvedValue(null);
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    expect(await screen.findByText('You are on the latest version')).toBeTruthy();
+    expect(state().available).toBeNull();
+  });
+
+  it('a null check keeps the update while downloading or ready', async () => {
+    api.checkForUpdate.mockResolvedValue(null);
+    for (const st of ['downloading', 'ready'] as const) {
+      state().reset();
+      state().setAvailable(info);
+      state().setStatus(st);
+      const { unmount } = render(<UpdatesBlock />);
+      fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+      expect(await screen.findByText('You are on the latest version')).toBeTruthy();
+      expect(state().available).toEqual(info);
+      expect(state().status).toBe(st);
+      unmount();
+    }
+  });
+
+  it('shows the Windows note only for a self-update on Windows', () => {
+    os.platform.mockReturnValue('windows');
+    state().setAvailable(info);
+    const { unmount } = render(<UpdatesBlock />);
+    expect(screen.getByText('Rocket will close to finish the update.')).toBeTruthy();
+    unmount();
+    os.platform.mockReturnValue('linux');
+    render(<UpdatesBlock />);
+    expect(screen.queryByText('Rocket will close to finish the update.')).toBeNull();
+  });
+
+  it('hides the Windows note for a manual install', () => {
+    os.platform.mockReturnValue('windows');
+    state().setInstallKind('manual');
+    state().setAvailable(info);
+    render(<UpdatesBlock />);
+    expect(screen.queryByText('Rocket will close to finish the update.')).toBeNull();
+  });
+
+  it('disables Update while downloading', () => {
+    state().setAvailable(info);
+    state().setStatus('downloading');
+    render(<UpdatesBlock />);
+    expect((screen.getByRole('button', { name: 'Downloading...' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 });

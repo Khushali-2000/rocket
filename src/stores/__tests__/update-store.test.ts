@@ -87,6 +87,13 @@ describe('update store', () => {
     expect(state().error).toBeNull();
   });
 
+  it('keeps ready when the install result is current', async () => {
+    api.installUpdate.mockResolvedValue(undefined);
+    state().setAvailable(info);
+    await installAvailableUpdate();
+    expect(state().status).toBe('ready');
+  });
+
   it('starts one install for two fast calls', async () => {
     api.installUpdate.mockResolvedValue(undefined);
     state().setAvailable(info);

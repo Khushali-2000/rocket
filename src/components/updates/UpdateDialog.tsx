@@ -10,7 +10,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { openRelease, UPDATE_TOAST_ID } from '@/components/updates/UpdateToast';
+import {
+  isWindows,
+  openRelease,
+  UPDATE_TOAST_ID,
+  WindowsCloseNote,
+} from '@/components/updates/UpdateToast';
 import { restartApp } from '@/lib/tauri-api';
 import { installAvailableUpdate, skipAvailableUpdate, useUpdateStore } from '@/stores/update-store';
 
@@ -44,6 +49,11 @@ export function UpdateDialog() {
             <MarkdownRenderer restricted>{available.notes}</MarkdownRenderer>
           ) : (
             <p className='text-sm text-muted-foreground'>No release notes.</p>
+          )}
+          {!manual && status === 'idle' && isWindows() && (
+            <div className='mt-3'>
+              <WindowsCloseNote />
+            </div>
           )}
           {status === 'downloading' && (
             <p className='mt-3 text-sm text-muted-foreground'>Downloading...</p>

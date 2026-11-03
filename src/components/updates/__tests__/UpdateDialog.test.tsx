@@ -7,7 +7,8 @@ const sonner = vi.hoisted(() => ({ custom: vi.fn(), dismiss: vi.fn(), error: vi.
 const opener = vi.hoisted(() => ({ openUrl: vi.fn() }));
 vi.mock('@/lib/tauri-api', () => api);
 vi.mock('sonner', () => ({ toast: sonner }));
-vi.mock('@tauri-apps/plugin-os', () => ({ platform: vi.fn(() => 'linux') }));
+const os = vi.hoisted(() => ({ platform: vi.fn() }));
+vi.mock('@tauri-apps/plugin-os', () => os);
 vi.mock('@tauri-apps/plugin-opener', () => opener);
 vi.mock('@/stores/update-store', async () => {
   const actual = await vi.importActual<typeof import('@/stores/update-store')>(
@@ -37,6 +38,7 @@ describe('UpdateDialog', () => {
     ]) {
       m.mockReset();
     }
+    os.platform.mockReset().mockReturnValue('linux');
     opener.openUrl.mockResolvedValue(undefined);
   });
 
@@ -85,8 +87,41 @@ describe('UpdateDialog', () => {
   it('Close closes', () => {
     openWith();
     render(<UpdateDialog />);
-    fireEvent.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+    // The last match is the footer button. The first is the sr-only X.
+    const closes = screen.getAllByRole('button', { name: 'Close' });
+    fireEvent.click(closes[closes.length - 1]);
     expect(state().dialogOpen).toBe(false);
+  });
+
+  it('shows the Windows note only for a self-update on Windows', () => {
+    os.platform.mockReturnValue('windows');
+    openWith();
+    const { unmount } = render(<UpdateDialog />);
+    expect(screen.getByText('Rocket will close to finish the update.')).toBeTruthy();
+    unmount();
+    os.platform.mockReturnValue('linux');
+    render(<UpdateDialog />);
+    expect(screen.queryByText('Rocket will close to finish the update.')).toBeNull();
+  });
+
+  it('hides the Windows note for a manual install', () => {
+    os.platform.mockReturnValue('windows');
+    state().setInstallKind('manual');
+    openWith();
+    render(<UpdateDialog />);
+    expect(screen.queryByText('Rocket will close to finish the update.')).toBeNull();
+  });
+
+  it('disables Update and Skip while downloading', () => {
+    openWith();
+    state().setStatus('downloading');
+    render(<UpdateDialog />);
+    expect((screen.getByRole('button', { name: 'Update' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole('button', { name: 'Skip this version' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it('shows View release for a manual install', () => {

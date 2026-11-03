@@ -19,12 +19,19 @@ export async function openRelease(version: string) {
   }
 }
 
-function isWindows(): boolean {
+export function isWindows(): boolean {
   try {
     return platform() === 'windows';
   } catch {
     return false;
   }
+}
+
+// The note shown before an install on Windows, where the installer may close Rocket.
+export function WindowsCloseNote() {
+  return (
+    <span className='text-xs text-muted-foreground'>Rocket will close to finish the update.</span>
+  );
 }
 
 function percent(downloaded: number, total: number | null): number | null {
@@ -103,11 +110,7 @@ export function UpdateToast({ info }: UpdateToastProps) {
 
       {status === 'idle' && (
         <>
-          {!manual && isWindows() && (
-            <span className='text-xs text-muted-foreground'>
-              Rocket will close to finish the update.
-            </span>
-          )}
+          {!manual && isWindows() && <WindowsCloseNote />}
           <div className='flex flex-wrap items-center gap-2'>
             {manual ? (
               <Button size='sm' onClick={() => void openRelease(info.version)}>
