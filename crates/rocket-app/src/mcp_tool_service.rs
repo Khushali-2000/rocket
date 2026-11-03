@@ -3637,6 +3637,21 @@ mod tests {
         secret_store: Arc<dyn rocket_environment::SecretStore>,
         fetcher: Arc<dyn rocket_environment::VaultSecretFetcher>,
     ) -> McpToolService {
+        vault_chip_service_with_trust(
+            env_factory,
+            secret_store,
+            fetcher,
+            crate::test_doubles::InMemoryTrustStore::allow_all(),
+        )
+    }
+
+    /// Like `vault_chip_service_with_factory`, with the given trust store.
+    fn vault_chip_service_with_trust(
+        env_factory: Arc<FakeEnvRepoFactory>,
+        secret_store: Arc<dyn rocket_environment::SecretStore>,
+        fetcher: Arc<dyn rocket_environment::VaultSecretFetcher>,
+        trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+    ) -> McpToolService {
         let repo = ConfigurableCollectionRepo::new();
         repo.with_request("my-api", "echo.yml", sample_request("Echo"));
         let connection = rocket_environment::SecretManagerConnection {
@@ -3664,7 +3679,8 @@ mod tests {
                 secret_store,
                 fetcher,
             )
-            .with_collection_env_repo_factory(Box::new(SharedEnvFactory(Arc::clone(&env_factory)))),
+            .with_collection_env_repo_factory(Box::new(SharedEnvFactory(Arc::clone(&env_factory))))
+            .with_trust_store(trust.clone()),
         );
         let repo_dyn: Arc<dyn CollectionRepository> = repo.clone();
         let publisher_dyn: Arc<dyn EventPublisher> = publisher.clone();
@@ -3677,7 +3693,7 @@ mod tests {
             dummy_workspace_path(),
             Box::new(SharedHistoryRepo(history)),
         )
-        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all())
+        .with_trust_store(trust)
     }
 
     #[tokio::test]
@@ -3698,6 +3714,54 @@ mod tests {
             )
             .await
             .expect("chip");
+        assert!(!chip.text.contains("vault-db-password-42"), "{}", chip.text);
+    }
+
+    /// Masks a response chip whose environment `dev` binds one vault secret, under `trust`.
+    async fn vault_chip_under(
+        trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+    ) -> (
+        Arc<crate::test_doubles::FakeVaultSecretFetcher>,
+        DomainResult<crate::ChipResource>,
+    ) {
+        let fetcher = crate::test_doubles::FakeVaultSecretFetcher::new(
+            [("id1".to_string(), "vault-db-password-42".to_string())].into(),
+        );
+        let env_factory = FakeEnvRepoFactory::new();
+        let mut env = Environment::new("dev");
+        env.external_secrets.push(vault_binding("prod", "id1"));
+        env_factory.with_env(env);
+        let svc = vault_chip_service_with_trust(
+            env_factory,
+            Arc::new(crate::test_doubles::FakeSecretStore("client-secret".into())),
+            Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
+            trust,
+        );
+        let chip = svc
+            .mask_response_chip(
+                "my-api",
+                "echo.yml",
+                Some("dev"),
+                &echo_response(r#"{"db":"vault-db-password-42"}"#),
+            )
+            .await;
+        (fetcher, chip)
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_chip_masking_does_not_fetch() {
+        let (fetcher, chip) =
+            vault_chip_under(crate::test_doubles::InMemoryTrustStore::new()).await;
+        chip.expect("the chip is still produced");
+        assert_eq!(fetcher.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_collection_chip_masking_fetches() {
+        let (fetcher, chip) =
+            vault_chip_under(crate::test_doubles::InMemoryTrustStore::allow_all()).await;
+        let chip = chip.expect("chip");
+        assert!(fetcher.call_count() >= 1);
         assert!(!chip.text.contains("vault-db-password-42"), "{}", chip.text);
     }
 

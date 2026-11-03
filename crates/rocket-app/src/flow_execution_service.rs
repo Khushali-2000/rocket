@@ -5788,14 +5788,20 @@ mod tests {
             Box::new(StaticEnvRepo(env)),
             Arc::new(SharedExecutor(Arc::clone(&executor))),
             Box::new(NullHistoryRepo),
-            Box::new(FakeCollectionRepo::new().build()),
+            // A repo that knows the collection, so the trust gate can read it.
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
             Box::new(NullCookieRepo),
             Box::new(NullEventPublisher),
             Box::new(FakeSecretManagerRepo(connection)),
             Arc::new(FakeSecretStore("client-secret".to_string())),
             Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
         )
-        .with_script_engine(fixed_wire("x"));
+        .with_script_engine(fixed_wire("x"))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
 
         let url = |n: &str| format!("https://api.example.com/{n}?key={{{{payments.apiKey}}}}");
         let flow = Flow {
@@ -12262,14 +12268,20 @@ mod tests {
             Box::new(StaticEnvRepo(env)),
             Arc::new(SharedExecutor(Arc::clone(&executor))),
             Box::new(NullHistoryRepo),
-            Box::new(FakeCollectionRepo::new().build()),
+            // A repo that knows the collection, so the trust gate can read it.
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
             Box::new(NullCookieRepo),
             Box::new(NullEventPublisher),
             Box::new(FakeSecretManagerRepo(connection)),
             Arc::new(FakeSecretStore("client-secret".to_string())),
             Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
         )
-        .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+        .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
         let flow = Flow {
             name: "wired".to_string(),
             nodes: vec![
@@ -13075,13 +13087,19 @@ mod tests {
             Box::new(SharedEnvRepo(Arc::clone(&env))),
             Arc::clone(&executor) as Arc<dyn HttpExecutor>,
             Box::new(NullHistoryRepo),
-            Box::new(FakeCollectionRepo::new().build()),
+            // A repo that knows the collection, so the trust gate can read it.
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
             Box::new(NullCookieRepo),
             Box::new(NullEventPublisher),
             Box::new(FakeSecretManagerRepo(connection)),
             Arc::new(FakeSecretStore("client-secret".to_string())),
             Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
-        );
+        )
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
         let service = template_auth_service(
             Auth::Bearer {
                 token: "{{payments.apiKey}}".to_string(),
@@ -13101,6 +13119,129 @@ mod tests {
             }]
         );
         assert_masked_in_run_output(&summary, "sk-vault-secret-123456");
+    }
+
+    /// Runs a flow with an Auth node, a saved inherit request, a vault reference in a header
+    /// and a callback URL in a request, under the given trust store.
+    async fn run_gate_flow(
+        trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+    ) -> (
+        FlowRunSummary,
+        Arc<RecordingExecutor>,
+        Arc<FakeVaultSecretFetcher>,
+    ) {
+        let mut vault_env = env_with(&[]);
+        vault_env
+            .external_secrets
+            .push(rocket_environment::ExternalSecretBinding {
+                alias: "payments".to_string(),
+                connection_id: "conn-1".to_string(),
+                vault_name: "prod-vault".to_string(),
+                secret_names: vec![rocket_environment::ExternalSecretRef {
+                    name: "apiKey".to_string(),
+                    secret_id: "sec-1".to_string(),
+                }],
+            });
+        let connection = rocket_environment::SecretManagerConnection {
+            id: "conn-1".to_string(),
+            label: "Prod RocketVault".to_string(),
+            base_url: "https://vault.internal:8774".to_string(),
+            client_id: "rocketapi".to_string(),
+            verify_ssl: true,
+            allow_insecure_http: false,
+            provider: Default::default(),
+            config: None,
+        };
+        let fetcher = FakeVaultSecretFetcher::new(HashMap::from([(
+            "sec-1".to_string(),
+            "sk-vault-secret-123456".to_string(),
+        )]));
+        let executor = RecordingExecutor::new();
+        let exec = RequestExecutionService::new(
+            Box::new(StaticEnvRepo(vault_env)),
+            Arc::new(SharedExecutor(Arc::clone(&executor))),
+            Box::new(NullHistoryRepo),
+            // A repo that knows the collection, so the trust gate can read it.
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(FakeSecretManagerRepo(connection)),
+            Arc::new(FakeSecretStore("client-secret".to_string())),
+            Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
+        )
+        .with_trust_store(trust);
+
+        let mut flow = auth_and_request_flow(true, Vec::new());
+        flow.nodes.push(request_flow_node(
+            "reg",
+            "https://api.example.com/register?cb={{callback.payment}}&k={{payments.apiKey}}",
+        ));
+        flow.nodes.push(wait_node("w", "payment"));
+        flow.edges
+            .push(trigger_edge("e1", "reg", handle::RESULT, "w"));
+        let fake = crate::test_doubles::FakeCallbackListener::with_long_tokens();
+        fake.queue_on_open(echoing_call("http://fake:1/cb/tok-secret-0"));
+        let service = service_with_saved_request(flow, rocket_shared::types::Auth::Inherit)
+            .with_callback_listener(Box::new(Arc::clone(&fake)));
+        let mut input = run_input("auth-req");
+        input.environment_name = Some("dev".to_string());
+
+        let summary = service.run(&exec, input).await.expect("run");
+        (summary, executor, fetcher)
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_flow_run_starts_and_never_fetches() {
+        let (summary, executor, fetcher) =
+            run_gate_flow(crate::test_doubles::InMemoryTrustStore::new()).await;
+
+        assert_eq!(
+            fetcher.call_count(),
+            0,
+            "a denied collection fetches nothing"
+        );
+        // The Auth node token still reaches the saved request.
+        assert!(
+            executor
+                .sent_auths()
+                .contains(&rocket_shared::types::Auth::Bearer {
+                    token: "flow-token-123456".to_string()
+                }),
+            "{:?}",
+            executor.sent_auths()
+        );
+        // The vault text stays as written and the callback URL still reaches its request.
+        let urls = executor.sent_urls();
+        let reg = urls
+            .iter()
+            .find(|u| u.contains("/register"))
+            .expect("the callback request was sent");
+        assert!(reg.contains("&k={{payments.apiKey}}"), "{reg}");
+        assert!(reg.contains("cb=http://fake:1/cb/tok-secret-0"), "{reg}");
+        // The callback secret and the Auth node token are still masked.
+        let json = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(!json.contains("tok-secret-0"), "{json}");
+        assert!(!json.contains("flow-token-123456"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_collection_flow_run_fetches_and_still_masks() {
+        let (summary, executor, fetcher) =
+            run_gate_flow(crate::test_doubles::InMemoryTrustStore::allow_all()).await;
+
+        assert_eq!(fetcher.call_count(), 1);
+        let urls = executor.sent_urls();
+        assert!(
+            urls.iter().any(|u| u.contains("&k=sk-vault-secret-123456")),
+            "{urls:?}"
+        );
+        let json = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(!json.contains("sk-vault-secret-123456"), "{json}");
+        assert!(!json.contains("tok-secret-0"), "{json}");
     }
 
     #[tokio::test]

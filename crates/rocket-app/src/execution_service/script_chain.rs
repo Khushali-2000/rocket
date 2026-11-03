@@ -1014,7 +1014,8 @@ mod secret_scan_tests {
             Box::new(FakeSecretManagerRepo(connection())),
             Arc::new(FakeSecretStore("client-secret".into())),
             Arc::new(FailingFetcher),
-        );
+        )
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
         (svc, executor)
     }
 

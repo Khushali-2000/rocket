@@ -1143,7 +1143,8 @@ fn failing_vault_service(
         Arc::new(FakeSecretStore("client-secret".into())),
         Arc::new(RejectingFetcher),
     )
-    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+    .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
     (svc, executor)
 }
 
@@ -1202,6 +1203,21 @@ fn value_vault_service(
     value: &'static str,
     env_vars: Vec<Variable>,
 ) -> (RequestExecutionService, Arc<KeepingExecutor>) {
+    value_vault_service_with(
+        collection,
+        env_vars,
+        Arc::new(ValueFetcher(value)),
+        crate::test_doubles::InMemoryTrustStore::allow_all(),
+    )
+}
+
+/// Like `value_vault_service`, with the given fetcher and trust store.
+fn value_vault_service_with(
+    collection: Collection,
+    env_vars: Vec<Variable>,
+    fetcher: Arc<dyn VaultSecretFetcher>,
+    trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+) -> (RequestExecutionService, Arc<KeepingExecutor>) {
     let executor = Arc::new(KeepingExecutor::default());
     let mut env = Environment::new("dev");
     env.variables.extend(env_vars);
@@ -1235,9 +1251,10 @@ fn value_vault_service(
         Box::new(NullEventPublisher),
         Box::new(FakeSecretManagerRepo(connection)),
         Arc::new(FakeSecretStore("client-secret".into())),
-        Arc::new(ValueFetcher(value)),
+        fetcher,
     )
-    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+    .with_trust_store(trust);
     (svc, executor)
 }
 
@@ -1254,6 +1271,65 @@ async fn a_vault_value_in_a_header_is_masked_in_the_sent_request() {
     assert_eq!(header.map(|h| h.value.as_str()), Some("••••••"));
     let json = serde_json::to_string(&sent).expect("serialize");
     assert!(!json.contains(VALUE), "{json}");
+}
+
+/// Runs `auth/login` from a send, where login sends `X-Key: {{vault.key}}`, under `trust`.
+async fn nested_vault_run(
+    trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+) -> (
+    Arc<KeepingExecutor>,
+    Arc<crate::test_doubles::FakeVaultSecretFetcher>,
+) {
+    let mut collection = main_and_login(
+        "await rok.runRequest('auth/login'); console.log('ran');",
+        "",
+        "",
+    );
+    login_uses_the_alias(&mut collection);
+    let input = send_input(&collection, "main.yml");
+    let fetcher = crate::test_doubles::FakeVaultSecretFetcher::new(
+        [("sec-1".to_string(), "vault-value-123456".to_string())].into(),
+    );
+    let (svc, executor) = value_vault_service_with(
+        collection,
+        Vec::new(),
+        Arc::clone(&fetcher) as Arc<dyn VaultSecretFetcher>,
+        trust,
+    );
+    svc.execute(input).await.expect("execute");
+    (executor, fetcher)
+}
+
+#[tokio::test]
+async fn a_denied_collection_nested_run_request_never_fetches() {
+    let (executor, fetcher) =
+        nested_vault_run(crate::test_doubles::InMemoryTrustStore::new()).await;
+    assert_eq!(fetcher.call_count(), 0);
+    let login = executor
+        .seen()
+        .into_iter()
+        .position(|r| r.url.contains("login.yml"))
+        .expect("login was sent");
+    assert_eq!(
+        sent_header(&executor, login, "X-Key").as_deref(),
+        Some("{{vault.key}}")
+    );
+}
+
+#[tokio::test]
+async fn an_allowed_collection_nested_run_request_fetches() {
+    let (executor, fetcher) =
+        nested_vault_run(crate::test_doubles::InMemoryTrustStore::allow_all()).await;
+    assert!(fetcher.call_count() >= 1);
+    let login = executor
+        .seen()
+        .into_iter()
+        .position(|r| r.url.contains("login.yml"))
+        .expect("login was sent");
+    assert_eq!(
+        sent_header(&executor, login, "X-Key").as_deref(),
+        Some("vault-value-123456")
+    );
 }
 
 const CATCH_RUN: &str = "try { await rok.runRequest('auth/login'); console.log('ran'); } \
@@ -2063,7 +2139,8 @@ async fn nested_e2e_a_vault_name_inside_an_env_value_is_sent_as_written() {
         Arc::new(FakeSecretStore("client-secret".into())),
         Arc::new(ValueFetcher("vault-value-123456")),
     )
-    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()));
+    .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+    .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
     svc.execute(input).await.expect("execute");
     assert_eq!(
         sent_header(&executor, 0, "X-V").as_deref(),

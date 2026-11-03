@@ -679,7 +679,8 @@ mod tests {
             Arc::new(FakeSecretStore("client-secret-xyz".to_string())),
             Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
         )
-        .with_script_engine(Box::new(SharedEngine(Arc::clone(&engine))));
+        .with_script_engine(Box::new(SharedEngine(Arc::clone(&engine))))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
 
         let runner = CollectionRunnerService::new(
             Box::new(SharedCollectionRepo(Arc::clone(&repo))),
@@ -714,6 +715,49 @@ mod tests {
             assert!(
                 url.ends_with("?key=sk-test-secret-value"),
                 "step {i} url {url} did not resolve {{{{payments.apiKey}}}} to the fetched value"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_runner_run_never_fetches() {
+        let collection = three_step_collection_with_secret_refs();
+        let repo = InMemoryCollectionRepo::new(collection);
+        let executor = RecordingExecutor::new();
+        let mut values = HashMap::new();
+        values.insert("sec-1".to_string(), "sk-test-secret-value".to_string());
+        let fetcher = FakeVaultSecretFetcher::new(values);
+        let exec = RequestExecutionService::new(
+            Box::new(StaticEnvRepo(environment_with_one_external_secret_binding())),
+            Arc::new(SharedExecutor(Arc::clone(&executor))),
+            Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(NullCookieRepo),
+            Box::new(rocket_shared::events::NullEventPublisher),
+            Box::new(FakeSecretManagerRepo(fake_connection())),
+            Arc::new(FakeSecretStore("client-secret-xyz".to_string())),
+            Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
+        )
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+        let runner = CollectionRunnerService::new(
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(rocket_shared::events::NullEventPublisher),
+        );
+        let mut input = sample_run_input();
+        input.environment_name = Some("prod".to_string());
+
+        let summary = runner.run(&exec, input).await.expect("run");
+
+        assert_eq!(
+            fetcher.call_count(),
+            0,
+            "a denied collection fetches nothing"
+        );
+        assert_eq!(summary.steps.len(), 3, "all 3 steps still run");
+        for url in executor.sent_urls() {
+            assert!(
+                url.ends_with("?key={{payments.apiKey}}"),
+                "the vault text must stay as written in {url}"
             );
         }
     }
@@ -796,7 +840,8 @@ mod tests {
             Arc::new(FakeSecretStore("client-secret-xyz".to_string())),
             FakeVaultSecretFetcher::new(values) as Arc<dyn rocket_environment::VaultSecretFetcher>,
         )
-        .with_script_engine(Box::new(SharedEngine(Arc::clone(&engine))));
+        .with_script_engine(Box::new(SharedEngine(Arc::clone(&engine))))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
         let runner = CollectionRunnerService::new(
             Box::new(SharedCollectionRepo(Arc::clone(&repo))),
             Box::new(SharedPublisher(Arc::clone(&publisher))),
@@ -857,6 +902,7 @@ mod tests {
             Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
         )
         .with_script_engine(Box::new(SharedEngine(Arc::clone(&engine))))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all())
         .with_collection_env_repo_factory(Box::new(StaticCollectionEnvRepoFactory(
             environment_with_one_external_secret_binding(),
         )));

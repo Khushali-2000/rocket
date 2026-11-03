@@ -892,6 +892,12 @@ impl RequestExecutionService {
             return Ok((result, failures));
         };
         let flat = flatten_scope(&env, repo.as_ref())?;
+        // A collection without the vault permission fetches nothing. The cycle check above
+        // still runs, so a broken `extends` chain is reported the same way. With no bindings
+        // there is nothing to gate, so the trust store is not read.
+        if flat.external_secrets.is_empty() || !self.vault_values_allowed(collection) {
+            return Ok((result, failures));
+        }
         'bindings: for binding in flat.external_secrets.iter().map(|f| &f.binding) {
             for secret_ref in &binding.secret_names {
                 let value = match crate::vault_secret_resolution::resolve_vault_secret_value(
@@ -1238,6 +1244,10 @@ impl RequestExecutionService {
         collection: &str,
         environment_names: &[String],
     ) -> DomainResult<std::collections::HashSet<String>> {
+        // A collection without the vault permission has no fetched values to mask.
+        if !self.vault_values_allowed(Some(collection)) {
+            return Ok(std::collections::HashSet::new());
+        }
         let repo = self.regular_env_repo(Some(collection));
         let mut seen = std::collections::HashSet::new();
         let mut fetches = Vec::new();
@@ -1335,6 +1345,16 @@ impl RequestExecutionService {
         match collection {
             None => true,
             Some(name) => self.effective_capabilities(name).process_env,
+        }
+    }
+
+    /// Whether RocketVault values may be fetched for `collection`. A request outside any
+    /// collection (a scratch request) is always allowed. A collection needs the vault values
+    /// permission of the trust store.
+    pub fn vault_values_allowed(&self, collection: Option<&str>) -> bool {
+        match collection {
+            None => true,
+            Some(name) => self.effective_capabilities(name).vault_values,
         }
     }
 
@@ -5318,7 +5338,8 @@ mod tests {
             Arc::new(FakeSecretStore),
             fetcher,
         )
-        .with_collection_env_repo_factory(Box::new(SingleCollectionEnvRepoFactory { env }));
+        .with_collection_env_repo_factory(Box::new(SingleCollectionEnvRepoFactory { env }))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
 
         let mut input = sample_input("https://api.example.com/{{payments.apiKey}}", Some("prod"));
         input.collection = Some("my-collection".to_string());
@@ -5336,6 +5357,122 @@ mod tests {
             .clone()
             .expect("executor was called");
         assert_eq!(url, "https://api.example.com/sk-live-test-value");
+    }
+
+    /// Hands every collection the same set of environments, found by name.
+    struct MapEnvFactory(std::collections::HashMap<String, Environment>);
+
+    impl rocket_environment::EnvironmentRepositoryFactory for MapEnvFactory {
+        fn for_collection(
+            &self,
+            _collection: &str,
+        ) -> Box<dyn rocket_environment::EnvironmentRepository> {
+            Box::new(crate::test_doubles::MapEnvRepo(self.0.clone()))
+        }
+    }
+
+    /// A service over collection "c" with one vault binding `vault.key`, the given trust store
+    /// and a counting fetcher.
+    fn gate_svc(
+        trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+    ) -> (
+        RequestExecutionService,
+        Arc<MockExecutor>,
+        Arc<FakeVaultFetcher>,
+    ) {
+        let mut env = Environment::new("prod");
+        env.external_secrets
+            .push(binding_with_refs("vault", vec![("key", "sec-1")]));
+        let fetcher = Arc::new(FakeVaultFetcher::new(vec![(
+            "sec-1",
+            FakeSecretOutcome::Value("sk-gate-value".to_string()),
+        )]));
+        let executor = Arc::new(MockExecutor::new(200));
+        let svc = RequestExecutionService::new(
+            Box::new(MockEnvRepo::empty()),
+            Arc::clone(&executor) as Arc<dyn HttpExecutor>,
+            Box::new(MockHistoryRepo::new()),
+            Box::new(StubCollectionRepo::empty()),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(FakeSecretManagerRepo::with_connection(test_connection(
+                "conn-1",
+            ))),
+            Arc::new(FakeSecretStore),
+            Arc::clone(&fetcher) as Arc<dyn rocket_environment::VaultSecretFetcher>,
+        )
+        .with_collection_env_repo_factory(Box::new(SingleCollectionEnvRepoFactory { env }))
+        .with_trust_store(trust);
+        (svc, executor, fetcher)
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_never_fetches_vault_values_on_a_single_send() {
+        let (svc, executor, fetcher) = gate_svc(crate::test_doubles::InMemoryTrustStore::new());
+        let mut input = sample_input("https://api.example.com/{{vault.key}}", Some("prod"));
+        input.collection = Some("c".to_string());
+
+        svc.execute(input).await.expect("execute");
+
+        assert_eq!(fetcher.calls.lock().expect("lock calls").len(), 0);
+        assert_eq!(sent_url(&executor), "https://api.example.com/{{vault.key}}");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_collection_fetches_vault_values_on_a_single_send() {
+        let (svc, executor, fetcher) =
+            gate_svc(crate::test_doubles::InMemoryTrustStore::allow_all());
+        let mut input = sample_input("https://api.example.com/{{vault.key}}", Some("prod"));
+        input.collection = Some("c".to_string());
+
+        svc.execute(input).await.expect("execute");
+
+        assert!(!fetcher.calls.lock().expect("lock calls").is_empty());
+        assert_eq!(sent_url(&executor), "https://api.example.com/sk-gate-value");
+    }
+
+    #[tokio::test]
+    async fn a_scratch_request_keeps_vault_access() {
+        let mut env = Environment::new("prod");
+        env.external_secrets
+            .push(binding_with_refs("vault", vec![("key", "sec-1")]));
+        let fetcher = Arc::new(FakeVaultFetcher::new(vec![(
+            "sec-1",
+            FakeSecretOutcome::Value("sk-gate-value".to_string()),
+        )]));
+        let svc = svc_with_vault(Some(env), Arc::clone(&fetcher))
+            .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
+
+        let result = svc
+            .resolve_external_secrets(None, Some("prod"))
+            .await
+            .expect("resolve");
+
+        assert!(!fetcher.calls.lock().expect("lock calls").is_empty());
+        assert_eq!(result.get("vault.key"), Some(&"sk-gate-value".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_still_reports_an_extends_cycle() {
+        let mut a = Environment::new("a");
+        a.extends = Some("b".into());
+        let mut b = Environment::new("b");
+        b.extends = Some("a".into());
+        let map: std::collections::HashMap<String, Environment> =
+            [a, b].into_iter().map(|e| (e.name.clone(), e)).collect();
+        for trust in [
+            crate::test_doubles::InMemoryTrustStore::new(),
+            crate::test_doubles::InMemoryTrustStore::allow_all(),
+        ] {
+            let svc = svc_with_vault(None, Arc::new(FakeVaultFetcher::new(vec![])))
+                .with_collection_env_repo_factory(Box::new(MapEnvFactory(map.clone())))
+                .with_trust_store(trust);
+            let err = svc
+                .resolve_external_secrets(Some("c"), Some("a"))
+                .await
+                .expect_err("a cycle must fail the fetch");
+            assert!(err.to_string().contains("a -> b -> a"), "{err}");
+        }
     }
 
     #[tokio::test]
