@@ -1,6 +1,7 @@
 import { ArrowLeftRight, CloudOff, HardDrive, WifiOff } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { ImageLightbox } from '@/components/ImageLightbox';
 import { Reveal } from '@/components/Reveal';
 import { Section, SectionHeader } from '@/components/Section';
 import { RocketCloud } from '@/components/illustrations';
@@ -62,6 +63,25 @@ export function LocalFirstSection() {
           })}
         </div>
       </div>
+
+      <Reveal delay={240} className="mt-6">
+        <div className="grid grid-cols-1 items-center gap-8 rounded-xl border border-border bg-card p-6 sm:p-7 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:gap-10">
+          <div>
+            <h3 className="font-heading text-[15px] font-semibold tracking-tight">
+              Arriving from Postman or Bruno costs one dialog
+            </h3>
+            <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
+              Paste a link or pick a file, the format is auto-detected, and folders can be grouped
+              by tag or by path on the way in — your existing collection, not a rebuild of it.
+            </p>
+          </div>
+          <ImageLightbox
+            src="/screenshots/import-collection.png"
+            alt="Rocket's Import Collection dialog, with Bruno, Postman, WSDL and OpenAPI source tabs"
+            className="block w-full rounded-lg border border-border"
+          />
+        </div>
+      </Reveal>
     </Section>
   );
 }
