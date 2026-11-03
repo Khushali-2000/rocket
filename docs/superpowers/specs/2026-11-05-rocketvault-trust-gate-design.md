@@ -11,7 +11,7 @@ A collection pulled or cloned from elsewhere can reference `{{alias.secret}}` an
 
 - A withheld `{{alias.secret}}` stays unresolved text, nothing is fetched, and the Console warns. The send is never blocked (same as `process.env`).
 - Two grant-only switches per collection, next to Host environment: **RocketVault values** and **RocketVault certificates**. A collection file never requests them.
-- Only a collection with a trust record has both on: created in Rocket, grandfathered at the 2026-10-11 migration, or otherwise granted. A collection imported, cloned or opened from disk since that migration has no record and starts with both off until allowed. An old `trust.yml` record without the vault keys reads as allowed. Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings (under review). Scratch requests (no collection) are always allowed.
+- Only a collection with a trust record has both on: created in Rocket, grandfathered at the 2026-10-11 migration, or otherwise granted. A collection imported, cloned or opened from disk since that migration has no record and starts with both off until allowed. An old `trust.yml` record without the vault keys reads as allowed. Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings. The upgrade is announced in the release notes (accepted: they start denied). Scratch requests (no collection) are always allowed.
 - No migration notice entry, because collections with a record keep access.
 - Out of scope: per-alias permissions.
 
@@ -51,7 +51,7 @@ A collection pulled or cloned from elsewhere can reference `{{alias.secret}}` an
 ## Security reasoning
 
 - The gate stops the fetch, not just the display: a denied collection never causes a keychain read or a network call to the vault.
-- Defaults match today's behaviour for every existing collection, so nothing breaks on upgrade, and only newly cloned or imported collections start closed.
+- Only collections with a trust record keep vault access. A collection imported, cloned or opened since the 2026-10-11 migration has no record and starts denied until the user allows it once.
 - A withheld placeholder is sent as written text; this reveals no value. The user sees the Console warning and decides.
 - `Trusted means trusted` still holds: a collection allowed vault access can send vault values to any host its requests name (accepted risk, unchanged).
 

@@ -27,7 +27,7 @@ A collection file only requests elevated access. `~/.rocket-api/trust.yml` holds
 Spec: `docs/superpowers/specs/2026-11-05-rocketvault-trust-gate-design.md` (the Addendum overrides earlier text).
 
 - Who has it: only a collection with a trust record: created in Rocket, grandfathered at the 2026-10-11 migration, or otherwise granted. A collection imported, cloned or opened from disk since that migration has no record and starts with vault denied, like host environment access, until the user allows the switch in its trust settings. An old `trust.yml` record without the vault keys reads as allowed.
-- Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings. This is under review.
+- Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings. The upgrade is announced in the release notes (accepted: they start denied).
 - Gate position: the vault fetch itself. A denied collection never reaches the keychain or the vault, so there is no keychain read and no network call.
 - Denied values: the placeholder stays unresolved. HTTP sends, the collection runner, Flow Request steps and Flow Input nodes add one Console warning.
 - Known limit: WebSocket, GraphQL subscriptions, gRPC, the OAuth2 Get token and refresh commands and Flow Auth nodes send `{{alias.x}}` unresolved with no warning. A token request then posts a literal `{{vault.clientSecret}}` and gets `invalid_client`.

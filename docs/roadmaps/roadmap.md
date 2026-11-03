@@ -165,7 +165,7 @@ Spec and parity map: `docs/superpowers/specs/2026-10-31-settings-page-shell-desi
 | R-75 | Settings: global client certificates per domain, merged with per-environment certificates | open | parity map in the spec | Brainstorm and spec. Rust. |
 | R-76 | Settings: editable Keybindings | open | parity map in the spec | Needs a shortcut registry in place of the hardcoded `useKeyboardShortcuts.ts`. |
 | R-77 | Settings: Cache and Beta | open | parity map in the spec | Decide what Rocket caches and which features are beta. |
-| R-78 | Per-collection trust gate for RocketVault values and certificates | done (branch `feat/rocketvault-trust-gate`, final commit `a48ae056` plus docs fixes) | spec `specs/2026-11-05-rocketvault-trust-gate-design.md`, notes `docs/features/collection-trust.md` | Imports and clones start denied; the upgrade impact is under review. No warning for WebSocket, GraphQL subscriptions, gRPC, OAuth2 token commands or Flow Auth nodes. |
+| R-78 | Per-collection trust gate for RocketVault values and certificates | done (branch `feat/rocketvault-trust-gate`, final commit `a48ae056` plus docs fixes) | spec `specs/2026-11-05-rocketvault-trust-gate-design.md`, notes `docs/features/collection-trust.md` | Imports and clones start denied; the upgrade is announced in the release notes. No warning for WebSocket, GraphQL subscriptions, gRPC, OAuth2 token commands or Flow Auth nodes. |
 
 ## 9. Probably dropped
 
