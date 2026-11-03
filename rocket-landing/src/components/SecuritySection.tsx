@@ -1,6 +1,7 @@
 import { EyeOff, FileLock2, Fingerprint, ScanLine, ShieldCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { ImageLightbox } from '@/components/ImageLightbox';
 import { Reveal } from '@/components/Reveal';
 import { ScreenshotFrame } from '@/components/ScreenshotFrame';
 import { Section, SectionHeader } from '@/components/Section';
@@ -88,10 +89,53 @@ export function SecuritySection() {
               Credentials have three homes, none of them your repo
             </h3>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-              RocketVault, an environment variable, or the operating system keychain. Collections
+              RocketVault, an environment variable, or the operating system keychain — or an
+              external manager like Azure Key Vault, connected once in Settings. Collections
               reference a secret; they never carry one. Exports blank literal credentials on the
               way out, with no option to include them.
             </p>
+            <ImageLightbox
+              src="/screenshots/secret-manager-connections.png"
+              alt="Rocket Settings showing two Secret Manager connections, RocketVault and Azure Key Vault"
+              className="mt-5 block w-full rounded-lg border border-border"
+            />
+          </div>
+        </Reveal>
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Reveal delay={140}>
+          <div className="flex h-full flex-col rounded-xl border border-border bg-card p-6">
+            <h3 className="font-heading text-sm font-semibold tracking-tight">
+              Every variable masked until you ask
+            </h3>
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+              Environments hold the real values — tokens, IDs, a password — and each one can be
+              revealed per row, on demand. The reveal is a view, the same rule as the console.
+            </p>
+            <ImageLightbox
+              src="/screenshots/environment-variables.png"
+              alt="Rocket's Manage Environments dialog, with environment variables listed and a masked password value next to a reveal toggle"
+              className="mt-5 block w-full rounded-lg border border-border"
+            />
+          </div>
+        </Reveal>
+
+        <Reveal delay={200}>
+          <div className="flex h-full flex-col rounded-xl border border-border bg-card p-6">
+            <h3 className="font-heading text-sm font-semibold tracking-tight">
+              The risky mode is an explicit opt-in, every time
+            </h3>
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+              Scripts run in Safe Mode by default — sandboxed, no filesystem or system access.
+              Developer Mode exists for the scripts that need it, and you choose it deliberately
+              rather than inheriting it from a collection you just opened.
+            </p>
+            <ImageLightbox
+              src="/screenshots/script-sandbox-modes.png"
+              alt="Rocket's script sandbox picker, showing Safe Mode as the default and Developer Mode as an explicit opt-in with full filesystem access"
+              className="mt-5 block w-full rounded-lg border border-border"
+            />
           </div>
         </Reveal>
       </div>

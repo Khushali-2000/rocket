@@ -57,11 +57,11 @@ export function FlowSection() {
 
       <Reveal className="mt-12 sm:mt-14">
         <ScreenshotFrame
-          src="/screenshots/flow-builder.png"
-          alt="The Rocket Flow canvas, with request nodes wired together through condition and transform steps"
-          title="Rocket — flows / checkout.flow.yml"
+          src="/screenshots/flow-run.png"
+          alt="A completed Rocket Flow run, with condition, transform and request nodes lit up green and each step's response shown inline"
+          title="Rocket — flows / UserList-Workflow"
           illustration={RocketOrbit}
-          aspect="aspect-16/9"
+          aspect="aspect-16/10"
         />
       </Reveal>
 

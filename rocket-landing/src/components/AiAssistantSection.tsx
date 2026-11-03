@@ -1,6 +1,7 @@
 import { Check, Eye, Pencil, PlugZap, Play, ScanSearch, ShieldCheck } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { ImageLightbox } from '@/components/ImageLightbox';
 import { Reveal } from '@/components/Reveal';
 import { ScreenshotFrame } from '@/components/ScreenshotFrame';
 import { Section, SectionHeader } from '@/components/Section';
@@ -74,6 +75,26 @@ export function AiAssistantSection() {
           <ModeLadder />
         </Reveal>
       </div>
+
+      <Reveal delay={160} className="mt-6">
+        <div className="grid grid-cols-1 items-center gap-8 rounded-xl border border-border bg-card p-6 sm:p-7 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:gap-10">
+          <div>
+            <h3 className="font-heading text-sm font-semibold tracking-tight">
+              Configured once in Settings, picked per conversation
+            </h3>
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+              Add Claude, Gemini or OpenAI as separate agents and switch between them from the
+              composer — nothing about the workspace, the approval flow or the masking changes
+              with the agent behind it.
+            </p>
+          </div>
+          <ImageLightbox
+            src="/screenshots/ai-agents.png"
+            alt="Rocket Settings listing three configured AI agents: Rocket-OpenAI, Rocket-Gemini and Rocket-Claude"
+            className="block w-full rounded-lg border border-border"
+          />
+        </div>
+      </Reveal>
     </Section>
   );
 }

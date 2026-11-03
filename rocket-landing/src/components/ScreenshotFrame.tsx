@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ComponentType } from 'react';
 
+import { ImageLightbox } from '@/components/ImageLightbox';
 import { cn } from '@/lib/utils';
 
 interface ScreenshotFrameProps {
@@ -54,11 +55,10 @@ export function ScreenshotFrame({
       {failed ? (
         <Placeholder Illustration={Illustration} filename={filename} aspect={aspect} />
       ) : (
-        <img
+        <ImageLightbox
           src={src}
           alt={alt}
           loading={priority ? 'eager' : 'lazy'}
-          decoding="async"
           onError={() => setFailed(true)}
           className="block h-auto w-full"
         />

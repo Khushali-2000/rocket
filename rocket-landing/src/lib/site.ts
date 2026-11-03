@@ -13,6 +13,8 @@ export const sections = {
   flow: 'flow',
   benchmarks: 'benchmarks',
   security: 'security',
+  openapi: 'openapi-sync',
+  contracts: 'contracts',
   download: 'download',
 } as const;
 
@@ -22,6 +24,8 @@ export const navLinks = [
   { href: `#${sections.flow}`, label: 'Flow' },
   { href: `#${sections.benchmarks}`, label: 'Benchmarks' },
   { href: `#${sections.security}`, label: 'Security' },
+  { href: `#${sections.openapi}`, label: 'OpenAPI Sync' },
+  { href: `#${sections.contracts}`, label: 'Contracts' },
 ];
 
 // Every measured figure on this page comes from the same run.

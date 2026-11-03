@@ -1,5 +1,6 @@
 import { AiAssistantSection } from '@/components/AiAssistantSection';
 import { BenchmarkSection } from '@/components/BenchmarkSection';
+import { ContractsSection } from '@/components/ContractsSection';
 import { FeatureGrid } from '@/components/FeatureGrid';
 import { FinalCta } from '@/components/FinalCta';
 import { FlowSection } from '@/components/FlowSection';
@@ -8,6 +9,7 @@ import { Hero } from '@/components/Hero';
 import { LoadTestingSection } from '@/components/LoadTestingSection';
 import { LocalFirstSection } from '@/components/LocalFirstSection';
 import { Nav } from '@/components/Nav';
+import { OpenApiSyncSection } from '@/components/OpenApiSyncSection';
 import { ProofStrip } from '@/components/ProofStrip';
 import { SecuritySection } from '@/components/SecuritySection';
 
@@ -31,6 +33,8 @@ function App() {
         <FlowSection />
         <BenchmarkSection />
         <SecuritySection />
+        <OpenApiSyncSection />
+        <ContractsSection />
         <LoadTestingSection />
         <LocalFirstSection />
         <FinalCta />
