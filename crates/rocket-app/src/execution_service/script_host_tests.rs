@@ -1230,6 +1230,14 @@ fn value_vault_service_with(
             secret_id: "sec-1".to_string(),
         }],
     });
+    // A RocketVault certificate for one domain, which only the certificate tests send to.
+    env.client_certificates
+        .push(rocket_shared::certificate::ClientCertificate::Vault {
+            domain: "cert.test".to_string(),
+            binding: "vault".to_string(),
+            certificate: "client-a".to_string(),
+            format: rocket_shared::certificate::VaultCertificateFormat::Pem,
+        });
     let connection = SecretManagerConnection {
         id: "conn-1".to_string(),
         label: "Test".to_string(),
@@ -2806,4 +2814,68 @@ async fn run_request_e2e_a_before_request_env_action_beats_the_inherited_write()
     assert!(out.script_error.is_none(), "{:?}", out.script_error);
     // Executor order: mid (0), leaf (1), main (2).
     assert_eq!(sent_header(&executor, 1, "X-U").as_deref(), Some("bob"));
+}
+
+/// Sends `main.yml`, whose script posts to the certificate domain, under `trust`.
+async fn script_send_to_certificate_domain(
+    trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+) -> (
+    Arc<KeepingExecutor>,
+    Arc<crate::test_doubles::FakeCertificateFetcher>,
+    crate::ExecuteRequestOutput,
+) {
+    let collection = main_and_login(
+        "try { await rok.sendRequest({ url: 'https://cert.test/side' }); } \
+         catch (e) { console.log('err', e.message); }",
+        "",
+        "",
+    );
+    let input = send_input(&collection, "main.yml");
+    let fetcher = crate::test_doubles::FakeCertificateFetcher::new(&[(
+        "client-a",
+        crate::test_doubles::FakeExport::Ok,
+    )]);
+    let (svc, executor) = value_vault_service_with(
+        collection,
+        Vec::new(),
+        Arc::clone(&fetcher) as Arc<dyn VaultSecretFetcher>,
+        trust,
+    );
+    let out = svc.execute(input).await.expect("execute");
+    (executor, fetcher, out)
+}
+
+/// The certificate the executor saw on the script's side request, as a short description.
+fn side_certificate(executor: &KeepingExecutor) -> String {
+    let side = executor
+        .seen()
+        .into_iter()
+        .find(|r| r.url == "https://cert.test/side")
+        .expect("the script sent its request");
+    crate::client_certificates::describe_all(&side.options.client_certificates)
+        .into_iter()
+        .find(|line| line.contains("cert.test"))
+        .expect("an entry for the domain")
+}
+
+#[tokio::test]
+async fn a_denied_collection_script_send_request_certificate_never_exports() {
+    let (executor, fetcher, _) =
+        script_send_to_certificate_domain(crate::test_doubles::InMemoryTrustStore::new()).await;
+    assert!(fetcher.calls().is_empty());
+    let line = side_certificate(&executor);
+    assert!(line.starts_with("unavailable cert.test"), "{line}");
+    assert!(
+        line.contains("RocketVault certificates are not allowed for this collection"),
+        "{line}"
+    );
+}
+
+#[tokio::test]
+async fn an_allowed_collection_script_send_request_certificate_exports() {
+    let (executor, fetcher, _) =
+        script_send_to_certificate_domain(crate::test_doubles::InMemoryTrustStore::allow_all())
+            .await;
+    assert_eq!(fetcher.calls(), vec!["dev-vault/client-a/pem"]);
+    assert!(side_certificate(&executor).starts_with("pem cert.test inline:"));
 }

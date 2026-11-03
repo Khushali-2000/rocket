@@ -284,7 +284,10 @@ pub async fn oauth2_refresh_token(
             &request.process_env,
         )
     });
-    svc.refresh_token_with_host_env(&request, &secrets, &host_env)
+    let allow_vault_certificates = tokio::task::block_in_place(|| {
+        exec.vault_certificates_allowed(request.collection.as_deref())
+    });
+    svc.refresh_token_with_host_env(&request, &secrets, &host_env, allow_vault_certificates)
         .await
 }
 
@@ -325,7 +328,11 @@ pub async fn oauth2_get_token(
             &request.process_env,
         )
     });
-    let config = svc.resolve_get_token_request_with_host_env(&request, &secrets, &host_env);
+    let mut config = svc.resolve_get_token_request_with_host_env(&request, &secrets, &host_env);
+    // The trust store is read from disk, so keep it off the async workers.
+    config.allow_vault_certificates = tokio::task::block_in_place(|| {
+        exec.vault_certificates_allowed(request.collection.as_deref())
+    });
 
     match config.grant_type.as_str() {
         "client_credentials" | "password" => svc.get_token_with_host_env(&config, &host_env).await,

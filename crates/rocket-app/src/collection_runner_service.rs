@@ -453,7 +453,10 @@ impl CollectionRunnerService {
             };
         }
 
-        let response = match exec.send_request(&state).await {
+        let response = match exec
+            .send_request(&state, step_input.collection.as_deref())
+            .await
+        {
             Ok(response) => response,
             Err(e) => {
                 *carried_runtime = state.var_ctx.runtime.clone();

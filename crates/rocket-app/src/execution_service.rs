@@ -1358,6 +1358,16 @@ impl RequestExecutionService {
         }
     }
 
+    /// Whether a RocketVault certificate may be fetched for `collection`. A request outside any
+    /// collection (a scratch request) is always allowed. A collection needs the vault
+    /// certificates permission of the trust store.
+    pub fn vault_certificates_allowed(&self, collection: Option<&str>) -> bool {
+        match collection {
+            None => true,
+            Some(name) => self.effective_capabilities(name).vault_certificates,
+        }
+    }
+
     /// The named environment flattened with its `extends` chain. `None` for `collection`
     /// reads the global store. A cycle is an error.
     pub fn resolved_environment(
@@ -3132,8 +3142,14 @@ impl RequestExecutionService {
 
     /// Dispatches the (possibly script-mutated) request. A RocketVault certificate selected for
     /// its URL, or for its OAuth2 client-credentials token URL, is fetched first.
-    pub(crate) async fn send_request(&self, state: &PhaseState) -> DomainResult<HttpResponse> {
-        let request = self.with_vault_certificates(&state.http_request).await;
+    pub(crate) async fn send_request(
+        &self,
+        state: &PhaseState,
+        collection: Option<&str>,
+    ) -> DomainResult<HttpResponse> {
+        let request = self
+            .with_vault_certificates(&state.http_request, collection)
+            .await;
         let response = self.executor.execute(&request).await.map_err(|e| {
             // A client may quote the URL re-encoded, so the encoded forms go too.
             let forms = crate::redaction::url_secret_forms(&state.var_ctx.secret_values);
@@ -3152,14 +3168,25 @@ impl RequestExecutionService {
 
     /// The request with its selected RocketVault certificates fetched. The fetched copy lives
     /// only for this send: `state.http_request`, which history and scripts see, keeps the
-    /// names-only form. A request with nothing to fetch is not copied.
+    /// names-only form. A request with nothing to fetch is not copied. When `collection` is not
+    /// allowed to use RocketVault certificates, a selected one is withheld without any export,
+    /// and the send fails with the reason.
     async fn with_vault_certificates<'r>(
         &self,
         request: &'r HttpRequest,
+        collection: Option<&str>,
     ) -> std::borrow::Cow<'r, HttpRequest> {
         let urls = crate::vault_certificates::certificate_urls(request);
         if !crate::vault_certificates::needs_fetch(&request.options.client_certificates, &urls) {
             return std::borrow::Cow::Borrowed(request);
+        }
+        if !self.vault_certificates_allowed(collection) {
+            let mut denied = request.clone();
+            crate::vault_certificates::deny_selected(
+                &mut denied.options.client_certificates,
+                &urls,
+            );
+            return std::borrow::Cow::Owned(denied);
         }
         let access = crate::vault_certificates::VaultCertificateAccess {
             connections: self.secret_manager_repo.as_ref(),
@@ -3600,7 +3627,9 @@ impl RequestExecutionService {
             masks: state.var_ctx.secret_values.clone(),
             host_values,
         });
-        let response = self.send_request(&state).await?;
+        let response = self
+            .send_request(&state, input.collection.as_deref())
+            .await?;
         self.run_after_response_phase(&input, ExecutionMode::Standalone, &response, &mut state)
             .await;
         self.run_tests_phase(&input, ExecutionMode::Standalone, &response, &mut state)
@@ -3639,7 +3668,9 @@ impl RequestExecutionService {
         state.nested = true;
         self.run_before_request_phase(&input, ExecutionMode::Standalone, &mut state)
             .await?;
-        let response = self.send_request(&state).await?;
+        let response = self
+            .send_request(&state, input.collection.as_deref())
+            .await?;
         self.run_after_response_phase(&input, ExecutionMode::Standalone, &response, &mut state)
             .await;
         self.run_tests_phase(&input, ExecutionMode::Standalone, &response, &mut state)
@@ -14449,7 +14480,7 @@ mod tests {
         })
         .join();
         assert!(poisoned.is_err());
-        let response = svc.send_request(&state).await.expect("send");
+        let response = svc.send_request(&state, None).await.expect("send");
         let output = svc.finish_phases(&input, response, &mut state).await;
         assert!(output
             .run_process_env_values

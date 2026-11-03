@@ -70,6 +70,44 @@ pub(crate) fn needs_fetch(certificates: &[ResolvedClientCertificate], urls: &[&s
         .any(|i| certificates[i].is_deferred())
 }
 
+/// A selected entry that is still a RocketVault certificate to fetch.
+struct Selected {
+    index: usize,
+    domain: String,
+    binding: VaultCertificateBinding,
+    certificate: String,
+    format: VaultCertificateFormat,
+    /// The start of every message about this entry.
+    label: String,
+}
+
+/// The entry selected for `url` when it is still `Deferred`. Both the fetch and the denial
+/// start from it, so they select the same entry.
+fn selected_deferred(certificates: &[ResolvedClientCertificate], url: &str) -> Option<Selected> {
+    let index = selected_index(certificates, url)?;
+    let CertificateMaterial::Deferred {
+        binding,
+        certificate,
+        format,
+    } = &certificates[index].material
+    else {
+        return None;
+    };
+    let domain = certificates[index].domain.clone();
+    let label = format!(
+        "The RocketVault certificate {certificate} (binding {}) for {domain}",
+        binding.alias
+    );
+    Some(Selected {
+        index,
+        domain,
+        binding: binding.clone(),
+        certificate: certificate.clone(),
+        format: *format,
+        label,
+    })
+}
+
 /// Replaces each entry selected for one of `urls` that is still `Deferred` by exported inline
 /// material, or by `Unavailable` with the reason when the export fails. Other entries are not
 /// touched and cause no RocketVault call. Without `access`, a selected vault certificate is
@@ -80,39 +118,44 @@ pub(crate) async fn materialize_selected(
     access: Option<&VaultCertificateAccess<'_>>,
 ) {
     for url in urls {
-        let Some(index) = selected_index(certificates, url) else {
+        let Some(sel) = selected_deferred(certificates, url) else {
             continue;
         };
-        let CertificateMaterial::Deferred {
-            binding,
-            certificate,
-            format: export_format,
-        } = &certificates[index].material
-        else {
-            continue;
-        };
-        let (binding, certificate, export_format) =
-            (binding.clone(), certificate.clone(), *export_format);
-        let domain = certificates[index].domain.clone();
-        let label = format!(
-            "The RocketVault certificate {certificate} (binding {}) for {domain}",
-            binding.alias
-        );
-        certificates[index] = match access {
+        certificates[sel.index] = match access {
             None => ResolvedClientCertificate::unavailable(
-                domain,
-                format!("{label} cannot be fetched here."),
+                sel.domain,
+                format!("{} cannot be fetched here.", sel.label),
             ),
             Some(access) => {
-                match fetch_material(access, &binding, &certificate, export_format).await {
-                    Ok(material) => into_inline(domain, material),
+                match fetch_material(access, &sel.binding, &sel.certificate, sel.format).await {
+                    Ok(material) => into_inline(sel.domain, material),
                     Err(err) => ResolvedClientCertificate::unavailable(
-                        domain,
-                        format!("{label} could not be fetched: {}", detail(&err)),
+                        sel.domain,
+                        format!("{} could not be fetched: {}", sel.label, detail(&err)),
                     ),
                 }
             }
         };
+    }
+}
+
+/// The reason a selected RocketVault certificate is withheld from a collection that is not
+/// allowed to use them. It is the sentence the user reads in the failed send.
+pub(crate) const VAULT_CERTIFICATES_DENIED: &str =
+    "RocketVault certificates are not allowed for this collection.";
+
+/// Marks each entry selected for one of `urls` that is still `Deferred` as `Unavailable` with
+/// `VAULT_CERTIFICATES_DENIED`, so the send fails before any export. It never touches
+/// RocketVault. Other entries are not touched.
+pub(crate) fn deny_selected(certificates: &mut [ResolvedClientCertificate], urls: &[&str]) {
+    for url in urls {
+        let Some(sel) = selected_deferred(certificates, url) else {
+            continue;
+        };
+        certificates[sel.index] = ResolvedClientCertificate::unavailable(
+            sel.domain,
+            format!("{} was not fetched. {VAULT_CERTIFICATES_DENIED}", sel.label),
+        );
     }
 }
 
@@ -935,7 +978,8 @@ mod wiring_tests {
             fetcher.clone(),
         );
 
-        let config = svc.resolve_get_token_request(&token_request());
+        let mut config = svc.resolve_get_token_request(&token_request());
+        config.allow_vault_certificates = true;
         let err = svc
             .get_token_direct(&config)
             .await
@@ -964,13 +1008,137 @@ mod wiring_tests {
         let provider = Arc::new(RecordingTokenClientProvider::default());
         let svc = oauth2_service(provider.clone());
 
-        let config = svc.resolve_get_token_request(&token_request());
+        let mut config = svc.resolve_get_token_request(&token_request());
+        config.allow_vault_certificates = true;
         let _ = svc.get_token_direct(&config).await;
 
         let seen = provider.seen.lock().expect("lock").clone();
         assert!(
             seen[0][1].starts_with("unavailable idp.example.com")
                 && seen[0][1].contains("cannot be fetched here"),
+            "{seen:?}"
+        );
+    }
+
+    fn trusted_service(
+        executor: Arc<CertificateRecordingExecutor>,
+        fetcher: Arc<FakeCertificateFetcher>,
+        trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+    ) -> RequestExecutionService {
+        service(executor, fetcher).with_trust_store(trust)
+    }
+
+    fn collection_input(url: &str) -> ExecuteRequestInput {
+        let mut request = input(url, Auth::None);
+        request.collection = Some("c".into());
+        request
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_fails_a_selected_vault_certificate_without_exporting() {
+        let executor = Arc::new(CertificateRecordingExecutor::default());
+        let fetcher = FakeCertificateFetcher::new(&[("client-a", FakeExport::Ok)]);
+        let svc = trusted_service(
+            executor.clone(),
+            fetcher.clone(),
+            crate::test_doubles::InMemoryTrustStore::new(),
+        );
+
+        svc.execute(collection_input("https://api.example.com/v1"))
+            .await
+            .expect("send");
+
+        assert!(fetcher.calls().is_empty());
+        // The recording executor sends anyway; the real one fails on the Unavailable entry.
+        let seen = executor.seen();
+        assert!(
+            seen[0][0].starts_with("unavailable api.example.com"),
+            "{seen:?}"
+        );
+        assert!(
+            seen[0][0].contains("RocketVault certificates are not allowed for this collection"),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_collection_exports_a_selected_vault_certificate() {
+        let executor = Arc::new(CertificateRecordingExecutor::default());
+        let fetcher = FakeCertificateFetcher::new(&[("client-a", FakeExport::Ok)]);
+        let svc = trusted_service(
+            executor.clone(),
+            fetcher.clone(),
+            crate::test_doubles::InMemoryTrustStore::allow_all(),
+        );
+
+        svc.execute(collection_input("https://api.example.com/v1"))
+            .await
+            .expect("send");
+
+        assert_eq!(fetcher.calls(), vec!["prod-vault/client-a/pem"]);
+        assert!(executor.seen()[0][0].starts_with("pem api.example.com inline:"));
+    }
+
+    #[tokio::test]
+    async fn a_scratch_request_exports_a_selected_vault_certificate() {
+        let executor = Arc::new(CertificateRecordingExecutor::default());
+        let fetcher = FakeCertificateFetcher::new(&[("client-a", FakeExport::Ok)]);
+        let svc = trusted_service(
+            executor.clone(),
+            fetcher.clone(),
+            crate::test_doubles::InMemoryTrustStore::new(),
+        );
+
+        svc.execute(input("https://api.example.com/v1", Auth::None))
+            .await
+            .expect("send");
+
+        assert_eq!(fetcher.calls(), vec!["prod-vault/client-a/pem"]);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_not_selected_for_the_url_is_never_denied() {
+        let executor = Arc::new(CertificateRecordingExecutor::default());
+        let fetcher = FakeCertificateFetcher::new(&[("client-a", FakeExport::Ok)]);
+        let svc = trusted_service(
+            executor.clone(),
+            fetcher.clone(),
+            crate::test_doubles::InMemoryTrustStore::new(),
+        );
+
+        svc.execute(collection_input("https://elsewhere.example.org/"))
+            .await
+            .expect("send");
+
+        assert!(fetcher.calls().is_empty());
+        let seen = executor.seen();
+        assert!(
+            seen[0].iter().all(|line| line.starts_with("deferred ")),
+            "{seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_oauth2_token_request_fails_a_selected_vault_certificate() {
+        let provider = Arc::new(RecordingTokenClientProvider::default());
+        let fetcher = FakeCertificateFetcher::new(&[("idp-cert", FakeExport::Ok)]);
+        let svc = oauth2_service(provider.clone()).with_vault_access(
+            Box::new(FakeSecretManagerRepo(connection())),
+            Arc::new(FakeSecretStore("client-secret".into())),
+            fetcher.clone(),
+        );
+
+        // A resolved config denies by default, as the command layer does for an untrusted one.
+        let config = svc.resolve_get_token_request(&token_request());
+        assert!(!config.allow_vault_certificates);
+        let _ = svc.get_token_direct(&config).await;
+
+        assert!(fetcher.calls().is_empty());
+        let seen = provider.seen.lock().expect("lock").clone();
+        assert!(
+            seen[0][1].starts_with("unavailable idp.example.com")
+                && seen[0][1]
+                    .contains("RocketVault certificates are not allowed for this collection"),
             "{seen:?}"
         );
     }

@@ -119,6 +119,9 @@ pub struct ResolvedOAuth2Config {
     /// The selected environment's client certificates, for a token endpoint that needs mutual
     /// TLS. The token client picks the one whose domain matches the token URL.
     pub client_certificates: Vec<ResolvedClientCertificate>,
+    /// Whether a RocketVault certificate selected for the token URL may be fetched. Resolving
+    /// leaves it `false`. The command layer sets it from the collection's trust.
+    pub allow_vault_certificates: bool,
 }
 
 /// Form body params and extra HTTP headers for an OAuth2 token request.
@@ -252,9 +255,15 @@ impl OAuth2Service {
         &self,
         url: &str,
         certificates: &'c [ResolvedClientCertificate],
+        allow_vault_certificates: bool,
     ) -> Cow<'c, [ResolvedClientCertificate]> {
         if !crate::vault_certificates::needs_fetch(certificates, &[url]) {
             return Cow::Borrowed(certificates);
+        }
+        if !allow_vault_certificates {
+            let mut denied = certificates.to_vec();
+            crate::vault_certificates::deny_selected(&mut denied, &[url]);
+            return Cow::Owned(denied);
         }
         let access =
             self.vault_access
@@ -458,7 +467,11 @@ impl OAuth2Service {
         // Apply queryparam-type extra token params to the URL (body-type were added to `form`).
         let url = apply_params_to_url(&config.token_url, &config.token_params);
         let certificates = self
-            .certificates_for(&url, &config.client_certificates)
+            .certificates_for(
+                &url,
+                &config.client_certificates,
+                config.allow_vault_certificates,
+            )
             .await;
         let client = self.token_client(&url, config.verify_ssl, &certificates)?;
         Self::post_token_request(&client, &url, &form, &extra_headers).await
@@ -487,19 +500,22 @@ impl OAuth2Service {
         req: &OAuth2RefreshRequest,
         external_secrets: &HashMap<String, String>,
     ) -> DomainResult<OAuthToken> {
-        self.refresh_token_with_host_env(req, external_secrets, &ProcessEnv::default())
+        self.refresh_token_with_host_env(req, external_secrets, &ProcessEnv::default(), false)
             .await
     }
 
     /// Refreshes an OAuth2 token like `refresh_token_with_secrets`, and resolves
-    /// `{{process.env.*}}` from `process_env` too. `.env` values are masked in an error.
+    /// `{{process.env.*}}` from `process_env` too. `.env` values are masked in an error. A
+    /// RocketVault certificate selected for the refresh URL is fetched only when
+    /// `allow_vault_certificates` is true.
     pub async fn refresh_token_with_host_env(
         &self,
         req: &OAuth2RefreshRequest,
         external_secrets: &HashMap<String, String>,
         process_env: &ProcessEnv,
+        allow_vault_certificates: bool,
     ) -> DomainResult<OAuthToken> {
-        self.refresh_token_resolved(req, external_secrets, process_env)
+        self.refresh_token_resolved(req, external_secrets, process_env, allow_vault_certificates)
             .await
             .map_err(|e| Self::mask_dot_env(e, process_env))
     }
@@ -509,6 +525,7 @@ impl OAuth2Service {
         req: &OAuth2RefreshRequest,
         external_secrets: &HashMap<String, String>,
         process_env: &ProcessEnv,
+        allow_vault_certificates: bool,
     ) -> DomainResult<OAuthToken> {
         let vars = self.build_variable_context(
             req.collection.as_deref(),
@@ -574,7 +591,9 @@ impl OAuth2Service {
             &vars,
             external_secrets,
         );
-        let certificates = self.certificates_for(&url, &environment_certificates).await;
+        let certificates = self
+            .certificates_for(&url, &environment_certificates, allow_vault_certificates)
+            .await;
         let client = self.token_client(&url, verify_ssl, &certificates)?;
         Self::post_token_request(&client, &url, &form, &extra_headers).await
     }
@@ -639,7 +658,11 @@ impl OAuth2Service {
         }
 
         let certificates = self
-            .certificates_for(&url, &config.client_certificates)
+            .certificates_for(
+                &url,
+                &config.client_certificates,
+                config.allow_vault_certificates,
+            )
             .await;
         let client = self.token_client(&url, config.verify_ssl, &certificates)?;
         Self::post_token_request(&client, &url, &form, &extra_headers).await
@@ -740,6 +763,7 @@ impl OAuth2Service {
                 &vars,
                 external_secrets,
             ),
+            allow_vault_certificates: false,
         }
     }
 }
@@ -919,6 +943,7 @@ pub(crate) mod tests {
             refresh_params: vec![],
             force_reauth: false,
             client_certificates: Vec::new(),
+            allow_vault_certificates: false,
         }
     }
 
@@ -995,6 +1020,7 @@ pub(crate) mod tests {
             refresh_params: vec![],
             force_reauth: false,
             client_certificates: Vec::new(),
+            allow_vault_certificates: false,
         };
         let form = OAuth2Service::build_code_exchange_form(
             &config,
@@ -1044,6 +1070,7 @@ pub(crate) mod tests {
             refresh_params: vec![],
             force_reauth: false,
             client_certificates: Vec::new(),
+            allow_vault_certificates: false,
         };
         let form =
             OAuth2Service::build_code_exchange_form(&config, "CODE", "http://localhost/cb", None);
@@ -1680,7 +1707,7 @@ pub(crate) mod tests {
             &["ROCKET_CS_KEY"],
         );
         let token = svc
-            .refresh_token_with_host_env(&req, &HashMap::new(), &env)
+            .refresh_token_with_host_env(&req, &HashMap::new(), &env, false)
             .await
             .expect("refresh");
         assert_eq!(token.access_token, "t");
@@ -1709,7 +1736,7 @@ pub(crate) mod tests {
             &["ROCKET_CS_KEY"],
         );
         let err = svc
-            .refresh_token_with_host_env(&req, &HashMap::new(), &env)
+            .refresh_token_with_host_env(&req, &HashMap::new(), &env, false)
             .await
             .expect_err("400");
         assert!(!err.to_string().contains("dotenv-secret-654321"), "{err}");

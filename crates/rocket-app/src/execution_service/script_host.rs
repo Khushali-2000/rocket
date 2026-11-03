@@ -142,7 +142,10 @@ impl ScriptHost for ExecutionScriptHost<'_> {
             .map_err(|e| HostError::Failed(format!("rok.sendRequest: {e}")))?;
         let http = http_request_for(&request, &self.options)?;
         // A RocketVault certificate selected for this URL is fetched first, as for a send.
-        let http = self.svc.with_vault_certificates(&http).await;
+        let http = self
+            .svc
+            .with_vault_certificates(&http, self.input.collection.as_deref())
+            .await;
         let limit = Duration::from_millis(request.timeout_ms);
         match tokio::time::timeout(limit, self.svc.executor.execute(&http)).await {
             Err(_) => Err(HostError::Failed(format!(
