@@ -934,6 +934,8 @@ pub fn run() {
             #[cfg(unix)]
             spawn_exit_signal_listener(app.handle().clone());
 
+            commands::updates::start_update_checker(app.handle());
+
             // Start filesystem watcher for the collections directory.
             let watcher_started = std::time::Instant::now();
             let watcher = NotifyFileWatcher::with_echo_guard(recent_writes);

@@ -1,7 +1,9 @@
-use rocket_app::{UpdateService, UpdateSettings};
+use std::time::Duration;
+
+use rocket_app::{should_announce, UpdateService, UpdateSettings};
 use rocket_shared::error::DomainError;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 /// IPC shape of a found update.
@@ -80,6 +82,59 @@ fn strip_v(version: &str) -> &str {
     version.strip_prefix('v').unwrap_or(version)
 }
 
+/// Whether the found version is the one the user asked to install.
+fn matches_requested(found: &str, requested: &str) -> bool {
+    strip_v(found) == strip_v(requested)
+}
+
+/// How long the checker sleeps before a check: 30 s at startup, then 6 h.
+pub(crate) fn wait_before_check(first: bool) -> Duration {
+    if first {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(6 * 60 * 60)
+    }
+}
+
+/// The update to announce, only when auto check is on and the version is newer and not skipped.
+pub(crate) fn announcement(
+    settings: &UpdateSettings,
+    current: &str,
+    found: Option<UpdateInfoDto>,
+) -> Option<UpdateInfoDto> {
+    let info = found?;
+    (settings.auto_check && should_announce(settings, current, &info.version)).then_some(info)
+}
+
+/// Starts the background loop that looks for a new release at startup and every 6 hours.
+pub fn start_update_checker(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let current = app.package_info().version.to_string();
+        let mut first = true;
+        loop {
+            tokio::time::sleep(wait_before_check(first)).await;
+            first = false;
+            let Some(svc) = app.try_state::<UpdateService>() else {
+                tracing::error!(code = "update_service_missing", "update checker stopped");
+                return;
+            };
+            // A read error counts as the default settings.
+            let settings = svc.settings().unwrap_or_default();
+            if !settings.auto_check {
+                continue;
+            }
+            // find_update already logged a failure once at warn level.
+            if let Ok(found) = find_update(&app).await {
+                let found = found.as_ref().map(info_from);
+                if let Some(info) = announcement(&settings, &current, found) {
+                    emit_update_available(&app, &info);
+                }
+            }
+        }
+    });
+}
+
 fn info_from(update: &tauri_plugin_updater::Update) -> UpdateInfoDto {
     let date = update.date.map(|d| {
         rfc3339(
@@ -102,8 +157,6 @@ fn info_from(update: &tauri_plugin_updater::Update) -> UpdateInfoDto {
 }
 
 /// Tells the webview that a newer release exists.
-// The background check in the next task is the first caller.
-#[allow(dead_code)]
 pub(crate) fn emit_update_available(app: &AppHandle, info: &UpdateInfoDto) {
     if let Err(e) = app.emit("update-available", info) {
         tracing::warn!("Could not emit update-available: {e}");
@@ -127,7 +180,7 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfoDto>, D
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: String) -> Result<(), DomainError> {
     let update = find_update(&app).await?;
-    let Some(update) = update.filter(|u| strip_v(&u.version) == strip_v(&version)) else {
+    let Some(update) = update.filter(|u| matches_requested(&u.version, &version)) else {
         return Err(DomainError::InvalidInput(
             "The update changed. Check again.".into(),
         ));
@@ -139,6 +192,7 @@ pub async fn install_update(app: AppHandle, version: String) -> Result<(), Domai
             move |chunk, total| {
                 let dto = progress_after(downloaded, chunk, total);
                 downloaded = dto.downloaded;
+                // A missed progress event is harmless, so the result is ignored.
                 let _ = progress_app.emit("update-progress", dto);
             },
             || {},
@@ -252,5 +306,65 @@ mod tests {
     fn strip_v_removes_one_leading_v() {
         assert_eq!(strip_v("v1.2.3"), "1.2.3");
         assert_eq!(strip_v("1.2.3"), "1.2.3");
+    }
+
+    fn dto(version: &str) -> UpdateInfoDto {
+        UpdateInfoDto {
+            version: version.into(),
+            notes: None,
+            date: None,
+        }
+    }
+
+    fn settings(auto_check: bool, skipped: Option<&str>) -> UpdateSettings {
+        UpdateSettings {
+            auto_check,
+            skipped_version: skipped.map(String::from),
+        }
+    }
+
+    #[test]
+    fn wait_is_30s_first_then_6h() {
+        assert_eq!(wait_before_check(true), Duration::from_secs(30));
+        assert_eq!(wait_before_check(false), Duration::from_secs(21_600));
+    }
+
+    #[test]
+    fn announcement_needs_a_found_update() {
+        assert!(announcement(&settings(true, None), "1.0.0", None).is_none());
+    }
+
+    #[test]
+    fn announcement_is_none_when_auto_check_is_off() {
+        assert!(announcement(&settings(false, None), "1.0.0", Some(dto("1.1.0"))).is_none());
+    }
+
+    #[test]
+    fn announcement_skips_the_skipped_version() {
+        let s = settings(true, Some("1.1.0"));
+        assert!(announcement(&s, "1.0.0", Some(dto("1.1.0"))).is_none());
+    }
+
+    #[test]
+    fn announcement_returns_a_newer_unskipped_version() {
+        let got = announcement(&settings(true, None), "1.0.0", Some(dto("1.1.0")));
+        assert_eq!(got.map(|i| i.version), Some("1.1.0".to_string()));
+    }
+
+    #[test]
+    fn announcement_ignores_equal_and_older_versions() {
+        let s = settings(true, None);
+        assert!(announcement(&s, "1.1.0", Some(dto("1.1.0"))).is_none());
+        assert!(announcement(&s, "1.1.0", Some(dto("1.0.0"))).is_none());
+    }
+
+    #[test]
+    fn matches_requested_ignores_a_v_prefix_on_either_side() {
+        assert!(matches_requested("1.2.3", "1.2.3"));
+        assert!(matches_requested("v1.2.3", "1.2.3"));
+        assert!(matches_requested("1.2.3", "v1.2.3"));
+        assert!(!matches_requested("1.2.3", "1.2.4"));
+        assert!(!matches_requested("1.2.3", ""));
+        assert!(matches_requested("", ""));
     }
 }
