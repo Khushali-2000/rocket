@@ -76,6 +76,7 @@ See `docs/features/openapi-sync-ux.md` for the OpenAPI sync tab (spec updates bu
 See `docs/features/ipc-command-acl.md` for the app command ACL (app-commands.txt, main-window-only access).
 See `docs/features/settings-page.md` for the global Settings page (sections, lock, shortcuts, how to add a section).
 See `docs/features/elevation.md` for the four elevation levels (VS Code colours, shadows, which surface uses which, borders).
+See `docs/features/update-notification.md` for the update notice (schedule, install kinds, settings, manual checks).
 See `docs/roadmaps/roadmap.md` for the master roadmap of unimplemented work, and `docs/roadmaps/flow-roadmap.md` for Flow (item IDs, status, batches). Update them when work ships.
 
 Delegation: for asks that mix sub-steps of different difficulty, use the `decompose-and-dispatch` skill and always state the subagent model. See `.claude/rules/delegation.md`.
