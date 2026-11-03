@@ -9,7 +9,7 @@ export const UPDATE_TOAST_ID = 'rocket-update';
 
 const RELEASE_URL = 'https://github.com/Snehal1112/rocket/releases/tag/';
 
-async function openRelease(version: string) {
+export async function openRelease(version: string) {
   const url = `${RELEASE_URL}v${version.replace(/^v/, '')}`;
   try {
     await openUrl(url);

@@ -64,6 +64,29 @@ describe('update store', () => {
     expect(state().available).toBeNull();
   });
 
+  it('resets a stale downloading status when the update changed during the install', async () => {
+    let finish: () => void = () => undefined;
+    api.installUpdate.mockReturnValue(new Promise<void>((r) => (finish = r)));
+    state().setAvailable(info);
+    const run = installAvailableUpdate();
+    state().setAvailable(null);
+    finish();
+    await run;
+    expect(state().status).toBe('idle');
+  });
+
+  it('resets a stale downloading status when the install fails after a change', async () => {
+    let fail: (e: Error) => void = () => undefined;
+    api.installUpdate.mockReturnValue(new Promise<void>((_, rej) => (fail = rej)));
+    state().setAvailable(info);
+    const run = installAvailableUpdate();
+    state().setAvailable({ ...info, version: '2.3.0' });
+    fail(new Error('boom'));
+    await run;
+    expect(state().status).toBe('idle');
+    expect(state().error).toBeNull();
+  });
+
   it('starts one install for two fast calls', async () => {
     api.installUpdate.mockResolvedValue(undefined);
     state().setAvailable(info);

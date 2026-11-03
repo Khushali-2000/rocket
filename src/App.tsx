@@ -14,6 +14,7 @@ import { PaneRenderer } from '@/components/panes/PaneRenderer';
 import { SplashScreen } from '@/components/SplashScreen';
 import { TitleBar } from '@/components/title-bar';
 import { Toaster } from '@/components/ui/sonner';
+import { UpdateDialog } from '@/components/updates/UpdateDialog';
 import { useBackendLogs } from '@/hooks/useBackendLogs';
 import { useFileWatcherFailed } from '@/hooks/useFileWatcherFailed';
 import { useFlowRequestPathEvents } from '@/hooks/useFlowRequestPathEvents';
@@ -289,6 +290,7 @@ function App() {
       {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
       <Toaster position='bottom-right' />
       <TrustMigrationNotice />
+      <UpdateDialog />
       <OpenApiSyncNotifier />
     </div>
   );

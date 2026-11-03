@@ -74,6 +74,10 @@ export async function installAvailableUpdate(): Promise<void> {
     const s = useUpdateStore.getState();
     s.setError(messageOf(e));
     s.setStatus('error');
+  } finally {
+    // A stale result must not leave the status stuck on downloading.
+    const s = useUpdateStore.getState();
+    if (!stillCurrent() && s.status === 'downloading') s.setStatus('idle');
   }
 }
 

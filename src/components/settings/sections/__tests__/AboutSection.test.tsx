@@ -8,6 +8,7 @@ import { AboutSection } from '../AboutSection';
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn() }));
 vi.mock('@tauri-apps/plugin-os', () => ({ platform: vi.fn(), version: vi.fn(), arch: vi.fn() }));
 vi.mock('@/lib/tauri-api', () => ({ getAppDataDir: vi.fn() }));
+vi.mock('../UpdatesBlock', () => ({ UpdatesBlock: () => null }));
 
 describe('AboutSection', () => {
   beforeEach(() => {

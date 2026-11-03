@@ -2,6 +2,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { arch, platform, version } from '@tauri-apps/plugin-os';
 import { useEffect, useState } from 'react';
 import { SettingsSectionHeader } from '@/components/settings/SettingsSectionHeader';
+import { UpdatesBlock } from '@/components/settings/sections/UpdatesBlock';
 import { getAppDataDir } from '@/lib/tauri-api';
 
 const UNKNOWN = 'Unknown';
@@ -52,6 +53,7 @@ export function AboutSection() {
           </div>
         ))}
       </dl>
+      <UpdatesBlock />
     </div>
   );
 }
