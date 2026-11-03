@@ -4250,3 +4250,50 @@ export const onGrpcSessionFinished = (
   handler: (event: GrpcSessionFinishedEvent) => void,
 ): Promise<UnlistenFn> =>
   listen<GrpcSessionFinishedEvent>('grpc-session-finished', (e) => handler(e.payload));
+
+// ============================================================
+// Updates
+// ============================================================
+
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface UpdateSettings {
+  autoCheck: boolean;
+  skippedVersion: string | null;
+}
+
+export type InstallKind = 'selfUpdatable' | 'manual';
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+export const checkForUpdate = (): Promise<UpdateInfo | null> =>
+  invoke<UpdateInfo | null>('check_for_update');
+
+export const installUpdate = (version: string): Promise<void> =>
+  invoke<void>('install_update', { version });
+
+export const restartApp = (): Promise<void> => invoke<void>('restart_app');
+
+export const getInstallKind = (): Promise<InstallKind> => invoke<InstallKind>('get_install_kind');
+
+export const getUpdateSettings = (): Promise<UpdateSettings> =>
+  invoke<UpdateSettings>('get_update_settings');
+
+export const setUpdateAutoCheck = (enabled: boolean): Promise<void> =>
+  invoke<void>('set_update_auto_check', { enabled });
+
+export const skipUpdateVersion = (version: string): Promise<void> =>
+  invoke<void>('skip_update_version', { version });
+
+export const onUpdateAvailable = (handler: (info: UpdateInfo) => void): Promise<UnlistenFn> =>
+  listen<UpdateInfo>('update-available', (e) => handler(e.payload));
+
+export const onUpdateProgress = (handler: (p: UpdateProgress) => void): Promise<UnlistenFn> =>
+  listen<UpdateProgress>('update-progress', (e) => handler(e.payload));

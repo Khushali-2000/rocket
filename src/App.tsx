@@ -18,6 +18,7 @@ import { useBackendLogs } from '@/hooks/useBackendLogs';
 import { useFileWatcherFailed } from '@/hooks/useFileWatcherFailed';
 import { useFlowRequestPathEvents } from '@/hooks/useFlowRequestPathEvents';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useUpdateNotice } from '@/hooks/useUpdateNotice';
 import { useAssistantEventBridge } from '@/lib/assistant-event-bridge';
 import { useGraphQlSubscriptionEventBridge } from '@/lib/graphql-subscription-event-bridge';
 import {
@@ -61,6 +62,7 @@ function App() {
   useGraphQlSubscriptionEventBridge();
   useBackendLogs();
   useFileWatcherFailed();
+  useUpdateNotice();
   useCollectionTrustEvents();
   useFlowRequestPathEvents();
 
