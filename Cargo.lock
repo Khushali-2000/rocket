@@ -5645,6 +5645,7 @@ dependencies = [
  "rocket-scripting",
  "rocket-shared",
  "rocket-workspace",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
