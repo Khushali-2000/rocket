@@ -78,4 +78,35 @@ describe('useUpdateNotice', () => {
     expect(unlistenA).toHaveBeenCalledTimes(1);
     expect(unlistenP).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps an in-flight download when a newer version is announced', async () => {
+    renderHook(() => useUpdateNotice());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => available(info('2.2.0')));
+    act(() => {
+      useUpdateStore.getState().setStatus('downloading');
+      progress({ downloaded: 1, total: 10 });
+    });
+    const calls = sonner.custom.mock.calls.length;
+    act(() => available(info('2.3.0')));
+    const s = useUpdateStore.getState();
+    expect(s.available?.version).toBe('2.2.0');
+    expect(s.status).toBe('downloading');
+    expect(s.progress).toEqual({ downloaded: 1, total: 10 });
+    expect(sonner.custom).toHaveBeenCalledTimes(calls);
+  });
+
+  it('does not announce a version again after it was skipped', async () => {
+    renderHook(() => useUpdateNotice());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => available(info('2.2.0')));
+    act(() => useUpdateStore.getState().setAvailable(null));
+    act(() => available(info('2.2.0')));
+    expect(sonner.custom).toHaveBeenCalledTimes(1);
+    expect(useUpdateStore.getState().available).toBeNull();
+  });
 });

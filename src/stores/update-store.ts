@@ -1,3 +1,4 @@
+import { toast } from 'sonner';
 import { create } from 'zustand';
 import {
   type InstallKind,
@@ -55,15 +56,21 @@ function messageOf(e: unknown): string {
 
 // Downloads and installs the available update.
 export async function installAvailableUpdate(): Promise<void> {
-  const { available, setStatus, setError, setProgress } = useUpdateStore.getState();
-  if (!available) return;
-  setError(null);
-  setProgress(null);
-  setStatus('downloading');
+  const first = useUpdateStore.getState();
+  // A second click while a download runs must not start another install.
+  if (first.status !== 'idle' && first.status !== 'error') return;
+  const started = first.available;
+  if (!started) return;
+  first.setError(null);
+  first.setProgress(null);
+  first.setStatus('downloading');
+  // A result counts only while the shown update is still the one that was started.
+  const stillCurrent = () => useUpdateStore.getState().available?.version === started.version;
   try {
-    await installUpdate(available.version);
-    useUpdateStore.getState().setStatus('ready');
+    await installUpdate(started.version);
+    if (stillCurrent()) useUpdateStore.getState().setStatus('ready');
   } catch (e) {
+    if (!stillCurrent()) return;
     const s = useUpdateStore.getState();
     s.setError(messageOf(e));
     s.setStatus('error');
@@ -74,6 +81,12 @@ export async function installAvailableUpdate(): Promise<void> {
 export async function skipAvailableUpdate(): Promise<void> {
   const { available } = useUpdateStore.getState();
   if (!available) return;
-  await skipUpdateVersion(available.version);
+  try {
+    await skipUpdateVersion(available.version);
+  } catch (e) {
+    console.warn('Could not save the skipped update version.', e);
+    // A fixed id keeps this to one toast.
+    toast.error('Could not save your choice', { id: 'rocket-update-skip-error' });
+  }
   useUpdateStore.getState().setAvailable(null);
 }

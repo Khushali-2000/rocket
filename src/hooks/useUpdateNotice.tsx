@@ -13,9 +13,9 @@ export function resetAnnouncedUpdates(): void {
 
 // Shows or refreshes the one update toast. The fixed id makes it update in place.
 function showToast(): void {
-  const { available, installKind } = useUpdateStore.getState();
+  const { available } = useUpdateStore.getState();
   if (!available) return;
-  toast.custom(() => <UpdateToast info={available} installKind={installKind} />, {
+  toast.custom(() => <UpdateToast info={available} />, {
     id: UPDATE_TOAST_ID,
     duration: Number.POSITIVE_INFINITY,
   });
@@ -43,8 +43,10 @@ export function useUpdateNotice(): void {
 
     void keep(
       onUpdateAvailable((info) => {
-        const s = useUpdateStore.getState();
-        if (s.available?.version === info.version && announced.has(info.version)) return;
+        const { status } = useUpdateStore.getState();
+        // A running or finished download keeps its update. The next check announces again.
+        if (status === 'downloading' || status === 'ready') return;
+        if (announced.has(info.version)) return;
         // A new version starts over, so old progress or errors do not leak into its toast.
         useUpdateStore.setState({ available: info, status: 'idle', progress: null, error: null });
         announced.add(info.version);

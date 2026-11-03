@@ -2,7 +2,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { platform } from '@tauri-apps/plugin-os';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { type InstallKind, restartApp, type UpdateInfo } from '@/lib/tauri-api';
+import { restartApp, type UpdateInfo } from '@/lib/tauri-api';
 import { installAvailableUpdate, skipAvailableUpdate, useUpdateStore } from '@/stores/update-store';
 
 export const UPDATE_TOAST_ID = 'rocket-update';
@@ -34,13 +34,13 @@ function percent(downloaded: number, total: number | null): number | null {
 
 interface UpdateToastProps {
   info: UpdateInfo;
-  installKind: InstallKind;
 }
 
-export function UpdateToast({ info, installKind }: UpdateToastProps) {
+export function UpdateToast({ info }: UpdateToastProps) {
   const status = useUpdateStore((s) => s.status);
   const progress = useUpdateStore((s) => s.progress);
   const error = useUpdateStore((s) => s.error);
+  const installKind = useUpdateStore((s) => s.installKind);
   const openDialog = useUpdateStore((s) => s.openDialog);
   const manual = installKind === 'manual';
   const pct = progress ? percent(progress.downloaded, progress.total) : null;
@@ -85,9 +85,17 @@ export function UpdateToast({ info, installKind }: UpdateToastProps) {
       {status === 'error' && (
         <div className='flex flex-col gap-2'>
           <span className='text-sm text-destructive'>{error ?? 'The update failed.'}</span>
-          <div>
-            <Button size='sm' onClick={() => void openRelease(info.version)}>
+          <div className='flex flex-wrap items-center gap-2'>
+            {!manual && (
+              <Button size='sm' onClick={() => void installAvailableUpdate()}>
+                Update
+              </Button>
+            )}
+            <Button size='sm' variant='outline' onClick={() => void openRelease(info.version)}>
               View release
+            </Button>
+            <Button size='sm' variant='ghost' onClick={() => toast.dismiss(UPDATE_TOAST_ID)}>
+              Later
             </Button>
           </div>
         </div>
