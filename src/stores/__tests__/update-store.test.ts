@@ -72,6 +72,17 @@ describe('update store', () => {
     expect(state().available).toEqual(info);
   });
 
+  it('drops the error type prefix from backend messages', async () => {
+    api.installUpdate.mockRejectedValue('Invalid input: The update changed. Check again.');
+    state().setAvailable(info);
+    await installAvailableUpdate();
+    expect(state().error).toBe('The update changed. Check again.');
+    state().setStatus('idle');
+    api.installUpdate.mockRejectedValue('Internal error: Could not install the update');
+    await installAvailableUpdate();
+    expect(state().error).toBe('Could not install the update');
+  });
+
   it('skips a version and clears the update', async () => {
     api.skipUpdateVersion.mockResolvedValue(undefined);
     state().setAvailable(info);

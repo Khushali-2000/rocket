@@ -196,4 +196,51 @@ describe('UpdatesBlock', () => {
       true,
     );
   });
+
+  it('Check now keeps a running download and its update', async () => {
+    state().setAvailable(info);
+    state().setStatus('downloading');
+    api.checkForUpdate.mockResolvedValue({ version: '2.3.0', notes: null, date: null });
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    expect(await screen.findByText(/Update in progress/)).toBeTruthy();
+    expect(state().available).toEqual(info);
+    expect(state().status).toBe('downloading');
+  });
+
+  it('Check now keeps a finished install and its Restart', async () => {
+    state().setAvailable(info);
+    state().setStatus('ready');
+    api.checkForUpdate.mockResolvedValue({ version: '2.3.0', notes: null, date: null });
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    expect(await screen.findByText(/Update in progress/)).toBeTruthy();
+    expect(state().available).toEqual(info);
+    expect(screen.getByRole('button', { name: 'Restart' })).toBeTruthy();
+  });
+
+  it('Check now clears an old error when a different version is found', async () => {
+    state().setAvailable(info);
+    state().setError('Could not install the update');
+    state().setStatus('error');
+    api.checkForUpdate.mockResolvedValue({ version: '2.3.0', notes: null, date: null });
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    expect(await screen.findByText(/Rocket 2\.3\.0 is available/)).toBeTruthy();
+    expect(state().status).toBe('idle');
+    expect(state().error).toBeNull();
+  });
+
+  it('Check now keeps the error when the same version is found', async () => {
+    state().setAvailable(info);
+    state().setError('Could not install the update');
+    state().setStatus('error');
+    api.checkForUpdate.mockResolvedValue(info);
+    render(<UpdatesBlock />);
+    fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Check now' })).toHaveProperty('disabled', false),
+    );
+    expect(state().status).toBe('error');
+  });
 });

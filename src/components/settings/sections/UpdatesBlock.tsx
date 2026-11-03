@@ -7,7 +7,7 @@ import { isWindows, openRelease, WindowsCloseNote } from '@/components/updates/U
 import { checkForUpdate, getUpdateSettings, restartApp, setUpdateAutoCheck } from '@/lib/tauri-api';
 import { installAvailableUpdate, useUpdateStore } from '@/stores/update-store';
 
-type CheckState = 'idle' | 'checking' | 'latest' | 'failed';
+type CheckState = 'idle' | 'checking' | 'latest' | 'busy' | 'failed';
 
 export function UpdatesBlock() {
   const available = useUpdateStore((s) => s.available);
@@ -71,7 +71,18 @@ export function UpdatesBlock() {
       // A manual check ignores the skipped version.
       const info = await checkForUpdate();
       if (info) {
-        useUpdateStore.getState().setAvailable(info);
+        const store = useUpdateStore.getState();
+        if (store.status === 'downloading' || store.status === 'ready') {
+          // A running or finished install keeps its update.
+          if (mounted.current) setCheck('busy');
+          return;
+        }
+        // A different version makes an old error stale.
+        if (store.status === 'error' && store.available?.version !== info.version) {
+          store.setError(null);
+          store.setStatus('idle');
+        }
+        store.setAvailable(info);
         if (mounted.current) setCheck('idle');
       } else {
         // A running or finished download keeps its update.
@@ -114,6 +125,9 @@ export function UpdatesBlock() {
       </div>
       {check === 'latest' && !available && (
         <span className='text-muted-foreground'>You are on the latest version</span>
+      )}
+      {check === 'busy' && (
+        <span className='text-muted-foreground'>Update in progress. Check again after it.</span>
       )}
       {saveFailed && <span className='text-destructive'>Could not save the setting.</span>}
       {check === 'failed' && <span className='text-destructive'>Could not check for updates.</span>}

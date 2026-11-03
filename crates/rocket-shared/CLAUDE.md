@@ -29,6 +29,9 @@ cargo check -p rocket-shared
 - `DomainEvent` — exhaustive enum of all domain events (collection, request, environment, workspace, HTTP execution, file-system, history, git). Tagged with `#[serde(tag = "type", rename_all = "camelCase")]` so variants serialize as `{"type": "collectionCreated", ...}` for Tauri's event bus.
 - `EventPublisher` — object-safe trait (`fn publish(&self, event: DomainEvent)`). Implemented by `TauriEventBus` in `rocket-infra`; `NullEventPublisher` is the no-op used in tests.
 
+### Update settings
+- `UpdateSettings` (`update_settings.rs`) — `auto_check` (default on) and `skipped_version`. `UpdateSettingsRepository` is the load/save trait, implemented by `FsUpdateSettingsRepo` in `rocket-infra`.
+
 ### HTTP primitives
 - `HttpMethod` — enum for GET/POST/PUT/PATCH/DELETE/OPTIONS/HEAD/TRACE/CONNECT plus `Custom(String)` for any other valid method token (`is_valid_method_token`, kept as written). Not `Copy`. Serializes as a plain string; `FromStr` matches standard names case-insensitively.
 - `Header` — keyed, enabled-flag struct with optional `Description`. `QueryParam` is a type alias of `Header`, so both share one shape and one serde form. `PathParam` — name and value with optional `Description`.

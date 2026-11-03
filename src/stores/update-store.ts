@@ -55,9 +55,11 @@ export const useUpdateStore = create<UpdateState>()((set) => ({
   reset: () => set({ ...initialState }),
 }));
 
+// The backend errors arrive as their Display text, so the type prefix is dropped.
 function messageOf(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === 'string' ? e : 'The update failed.';
+  const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : '';
+  const text = raw.replace(/^(Invalid input|Internal error): /, '');
+  return text || 'The update failed.';
 }
 
 // Downloads and installs the available update.
