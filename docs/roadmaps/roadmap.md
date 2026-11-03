@@ -180,6 +180,14 @@ Confirm with the user before marking `dropped`.
 
 See [flow-roadmap.md](flow-roadmap.md). Seven batches B1 to B7, 56 items.
 
+## 11. Rust style (Google guide)
+
+See [rust-style-roadmap.md](rust-style-roadmap.md). Full audit of all crates done on 2026-11-03. Phases 0 to 8: decisions (S-01 to S-06), safety (S-10 to S-34), imports, signatures, clones, structure, docs, guardrails, nits.
+
+## 12. DDD architecture
+
+See [ddd-roadmap.md](ddd-roadmap.md). Audit of 2026-11-03: dependencies and ports are sound, the domain model and context boundaries are not. Items D-10 to D-93 in phases 0 to 9.
+
 ## Decisions log
 
 - Ruling (2026-10-08): protocol parity plans 01 to 13 (REST, SOAP, GraphQL, WebSocket, gRPC) are on main. The `worktree-protocol-parity-rest` branch no longer exists.

@@ -1,5 +1,50 @@
 # Changelog
 
+## [2.1.5](https://github.com/Snehal1112/rocket/compare/v2.1.4...v2.1.5) (2026-11-03)
+
+### Features
+
+* add rocket landing page project ([#143](https://github.com/Snehal1112/rocket/issues/143)) ([6eb5716](https://github.com/Snehal1112/rocket/commit/6eb5716c61884b648013ca12188e7e220cf3a24b))
+* **flow:** invalidate cached script and Input nodes when plain variables change ([ff5a957](https://github.com/Snehal1112/rocket/commit/ff5a957086469a4ff051dd9ab566882cd372d11a))
+* **flow:** one scope per node with callback, dynamic and nested variables in scripts ([0994f0c](https://github.com/Snehal1112/rocket/commit/0994f0caa151964a8fd73b4307b37f1a64963449))
+* **flow:** resolve placeholders in script string literals ([46e1944](https://github.com/Snehal1112/rocket/commit/46e1944cbd4dd16aaa4fe0feaba82468d93d94e3))
+* **folders:** show inherited headers on folders ([ec06d85](https://github.com/Snehal1112/rocket/commit/ec06d8556453e30e232ee76a83b293b6df1d5a76))
+* **folders:** show item counts in folder header ([b77ffe9](https://github.com/Snehal1112/rocket/commit/b77ffe909790b24d4f55861ff09cb83817a68d9a))
+* **scripting:** make script writes reach the request ([020a2da](https://github.com/Snehal1112/rocket/commit/020a2da8325c505e8a552671f7e8c1c5f84780de))
+* **trust:** add RocketVault values and certificates capabilities ([e8c0456](https://github.com/Snehal1112/rocket/commit/e8c0456e90933df86d289b43b20ced71460bac05))
+* **trust:** RocketVault switches in collection trust settings and docs ([a48ae05](https://github.com/Snehal1112/rocket/commit/a48ae05609a7e52596b0f9c99d3036a752f57b60))
+* **trust:** warn once when a RocketVault placeholder is withheld ([9e12dd8](https://github.com/Snehal1112/rocket/commit/9e12dd84d6cb39469d661529f3fd80ffd81bf6f2))
+* **trust:** withhold RocketVault certificates from collections that are not allowed ([fe37c0c](https://github.com/Snehal1112/rocket/commit/fe37c0c95f34b2318206089d9cf0f79e22bd08be))
+* **trust:** withhold RocketVault values from collections that are not allowed ([fafc444](https://github.com/Snehal1112/rocket/commit/fafc4445d3ccc35343e6fec9e7f98466d6299eb5))
+* **update:** add update check, install and settings commands ([b61635d](https://github.com/Snehal1112/rocket/commit/b61635da8243b4899c5dee8feba9c2cfb786f22e))
+* **update:** add update settings and version logic ([2d36a8f](https://github.com/Snehal1112/rocket/commit/2d36a8fe8b1ea928a20b799d7c8a8f87bbd54a8d))
+* **update:** check for releases at startup and every 6 hours ([663905a](https://github.com/Snehal1112/rocket/commit/663905aba4d586fdf81ab8dcdd959e4458b319d0))
+* **update:** release notes dialog and updates block in About ([a29f7aa](https://github.com/Snehal1112/rocket/commit/a29f7aa300be8895fc9be4f1e5569903b3c3ab0b))
+* **update:** show a toast when a new release is available ([554d3a0](https://github.com/Snehal1112/rocket/commit/554d3a0b4086683304b6c3d4596a5af66dd3f333))
+
+### Bug Fixes
+
+* **elevation:** use z-5 in tests, panel and docs ([cdf115f](https://github.com/Snehal1112/rocket/commit/cdf115f6eb97d0c42af851de0461f7642b6b23d3))
+* **flow:** carry used host process env values to later nodes' masks ([431d8ad](https://github.com/Snehal1112/rocket/commit/431d8adaaa261d35eb19fd50145c2666bc150e92))
+* **flow:** carry used host values into later Request sends' masks ([dc49db3](https://github.com/Snehal1112/rocket/commit/dc49db318d010f0d1090813f1fad9ea8386b34a8))
+* **flow:** harden script literal escaping ([0def248](https://github.com/Snehal1112/rocket/commit/0def2486d1484fbcbd7a992eaf5b905f715d1c06))
+* **flow:** keep cache hashes stable for dynamic names and document edge exception ([f154577](https://github.com/Snehal1112/rocket/commit/f1545779cd29c276f2ac4a2d5a805982739dc7cb))
+* **flow:** mask a failed Request's and poll condition's own host values ([3dc3314](https://github.com/Snehal1112/rocket/commit/3dc3314566e37e26d867e8341ba9102f418280be))
+* **flow:** mask a send's own used host process.env values in history, event and error ([6225105](https://github.com/Snehal1112/rocket/commit/6225105cb27547f76f6a309f524f37ef7e91a898))
+* **flow:** mask escaped secrets and escape slash in script source values ([88443cd](https://github.com/Snehal1112/rocket/commit/88443cdfecaf795351503b589f4a9f8439756bad))
+* **flow:** mask JSON-escaped secrets and used process env values in script logs ([f5e0b66](https://github.com/Snehal1112/rocket/commit/f5e0b66575942b525671aa81190e09db0dcc12d4))
+* **flow:** mask request script console with used host values and fix docs ([a2b755a](https://github.com/Snehal1112/rocket/commit/a2b755a14c9417f25ca6f410b85035576a3b0062))
+* **flow:** mask resolved script secrets in wire and Transform errors ([4cb13d4](https://github.com/Snehal1112/rocket/commit/4cb13d44b4a8974b2d386de151b7397f67ea2c9d))
+* **flow:** read plan-time scopes lazily and close masking test gaps ([df09727](https://github.com/Snehal1112/rocket/commit/df097275dd403cbbd2be7c6db2d3342b8e7d1707))
+* **flow:** resolve placeholders in wire and Transform script sources ([829c7e8](https://github.com/Snehal1112/rocket/commit/829c7e8d52c1141e8c6819b5166e943ece011c04))
+* **linux:** gate WebKit compositing on its version ([1545725](https://github.com/Snehal1112/rocket/commit/1545725a3fb11339a78e50f983337bc2bd5899e8))
+* **trust:** honour the certificate gate for Flow auth-node token fetches ([4a9e373](https://github.com/Snehal1112/rocket/commit/4a9e373573a12d865f612ff869ea5ba6f3907a57))
+* **update:** guard Check now during installs and correct the docs ([743d686](https://github.com/Snehal1112/rocket/commit/743d686d9fc91f11904f964f60d12ad6849333da))
+* **update:** guard installs and keep an in-flight download ([771ef11](https://github.com/Snehal1112/rocket/commit/771ef119fca4d407819a5bf9909a34565fb42074))
+* **update:** reset error state when the update clears ([ca64c14](https://github.com/Snehal1112/rocket/commit/ca64c14774614c8a0a91f5c5be17efce6af011a3))
+* **update:** run Rocket's exit cleanup before an update install ([4bc8bfb](https://github.com/Snehal1112/rocket/commit/4bc8bfbdd571ae46d65c8788f735b2aeeca26004))
+* **update:** Windows note in the dialog and a tested auto-check rollback ([cd46d7a](https://github.com/Snehal1112/rocket/commit/cd46d7ab0ad07e12675c9219ea987acf93d41fa8))
+
 ## [2.1.4](https://github.com/Snehal1112/rocket/compare/v2.1.3...v2.1.4) (2026-10-31)
 
 ### Features
