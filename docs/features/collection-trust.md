@@ -26,9 +26,11 @@ A collection file only requests elevated access. `~/.rocket-api/trust.yml` holds
 
 Spec: `docs/superpowers/specs/2026-11-05-rocketvault-trust-gate-design.md` (the Addendum overrides earlier text).
 
-- Who has it: existing collections (grandfathered) and collections Rocket creates. Clones and imports do not, until the user allows the switch in the collection's trust settings.
+- Who has it: only a collection with a trust record: created in Rocket, grandfathered at the 2026-10-11 migration, or otherwise granted. A collection imported, cloned or opened from disk since that migration has no record and starts with vault denied, like host environment access, until the user allows the switch in its trust settings. An old `trust.yml` record without the vault keys reads as allowed.
+- Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings. This is under review.
 - Gate position: the vault fetch itself. A denied collection never reaches the keychain or the vault, so there is no keychain read and no network call.
-- Denied values: the placeholder stays unresolved and the Console shows one warning.
+- Denied values: the placeholder stays unresolved. HTTP sends, the collection runner, Flow Request steps and Flow Input nodes add one Console warning.
+- Known limit: WebSocket, GraphQL subscriptions, gRPC, the OAuth2 Get token and refresh commands and Flow Auth nodes send `{{alias.x}}` unresolved with no warning. A token request then posts a literal `{{vault.clientSecret}}` and gets `invalid_client`.
 - Denied certificates: a selected vault certificate fails the send with "RocketVault certificates are not allowed for this collection". OAuth2 token requests and Flow auth nodes follow the same rule.
 - Not gated: the app-global agent credential and the names listing. Scratch requests keep access.
 - Warning detection covers request templates (URL, headers, query, body, path params, auth fields) and Flow Input text. It does not see text a script writes or `rok.getSecretVar` reads.
@@ -51,7 +53,7 @@ Manual check: clone a collection with a vault binding and send a request. Confir
 - A request with no collection (scratch) keeps full access. A History tab is not scratch: it follows its entry's collection, or gets no host environment when the entry has none (see Known limits).
 - `.env` files named by an environment's `dotEnvFilePath` (and its parents') are read only when this gate allows host environment access. The default `<collection>/.env` (and the workspace base `.env`) is read under the same gate, with no environment selected, as the lowest layers. A denied gate means no file is read at all. The real OS environment wins over a `.env` value with the same name, and every `.env` value is masked in the Console (reveal toggle shows it).
 - Before a send, `warnIfProcessEnvWithheld` (`src/lib/process-env-gate.ts`) adds a console line and a toast when the text uses a placeholder and access is withheld. The send is never blocked.
-- Who has it: collections that existed at the upgrade (grandfathered), collections created in Rocket. Clones and imports have none until allowed.
+- Who has it: collections with a trust record (grandfathered at the 2026-10-11 migration, created in Rocket, or granted). Imports, clones and collections opened from disk since then have none until allowed.
 
 ## Migration
 

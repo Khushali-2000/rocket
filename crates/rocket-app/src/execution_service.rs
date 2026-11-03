@@ -962,6 +962,7 @@ impl RequestExecutionService {
             &std::collections::HashMap::new(),
             &mut std::collections::HashSet::new(),
         );
+        // Binding the owned name first ends the borrow of the template.
         let name = template.vault_names(&aliases).next().map(str::to_string);
         name
     }

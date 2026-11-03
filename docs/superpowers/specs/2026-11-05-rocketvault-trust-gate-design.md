@@ -11,8 +11,8 @@ A collection pulled or cloned from elsewhere can reference `{{alias.secret}}` an
 
 - A withheld `{{alias.secret}}` stays unresolved text, nothing is fetched, and the Console warns. The send is never blocked (same as `process.env`).
 - Two grant-only switches per collection, next to Host environment: **RocketVault values** and **RocketVault certificates**. A collection file never requests them.
-- Existing and Rocket-created collections have both on. Clones and imports have both off until allowed. Scratch requests (no collection) are always allowed.
-- No migration notice entry, because existing collections keep access.
+- Only a collection with a trust record has both on: created in Rocket, grandfathered at the 2026-10-11 migration, or otherwise granted. A collection imported, cloned or opened from disk since that migration has no record and starts with both off until allowed. An old `trust.yml` record without the vault keys reads as allowed. Upgrade note: users with imported or cloned collections that use RocketVault must allow it once in the collection's trust settings (under review). Scratch requests (no collection) are always allowed.
+- No migration notice entry, because collections with a record keep access.
 - Out of scope: per-alias permissions.
 
 ## Design
@@ -75,7 +75,7 @@ These facts from the code replace the matching sentences above.
 
 - **Certificates fail the send.** `materialize_selected(.., None)` marks a selected vault certificate `Unavailable`, and `ReqwestExecutor::load_identity` turns that into an `InvalidInput` error. So a denied collection's selected vault certificate makes that send fail. It is not sent without the certificate. The error text must say that RocketVault certificates are not allowed for this collection (no extra Console line is needed). The fetcher is never called.
 - **OAuth2 token requests have a second certificate path.** `OAuth2Service::certificates_for` (token and refresh) has its own vault access and no trust store. It is gated too: a denied collection passes no vault access, so a selected vault certificate fails with the same text.
-- **`migrate_legacy` changes.** The new fields force its grant literal to set both vault flags true, so grandfathered collections keep access.
+- **`migrate_legacy` changes.** The new fields force its grant literal to set both vault flags true, so collections grandfathered at the 2026-10-11 migration keep access.
 - **Gate order.** In `resolve_external_secrets_partial` the gate sits after the environment is read and flattened (an `extends` cycle error still shows) and before the fetch loop.
 - **Reporting.** The backend owns the Console line for every send, the manual single send included, because the backend resolves vault values for it. A separate flag `vault_withheld` (not `nested_withheld`) carries a nested run's warning. The frontend `warnIfVaultWithheld` toast is dropped, so a manual send does not warn twice. Flow and runner steps compute "referenced but withheld" per step in `resolve_request_parts`, because they never call `resolve_external_secrets_partial` per step. A name counts as a vault reference when it starts with `<alias>.` for an alias bound in the active environment (`flatten_scope(...).external_secrets`).
 - **Frontend.** `makeTrust()` in `src/test/trust-fixtures.tsx` and every typed `CollectionTrust` mock gain both fields.

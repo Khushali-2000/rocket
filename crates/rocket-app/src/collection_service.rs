@@ -271,7 +271,8 @@ impl CollectionService {
         Collection::validate_name(name)?;
         let collection = self.repo.create(name)?;
         // A collection made in Rocket requests nothing elevated, so it only gets host
-        // environment and RocketVault access. A failure here leaves the collection untrusted, which is safe.
+        // environment and RocketVault access. A failure here leaves the collection
+        // untrusted, which is safe.
         if let (Some(trust), Ok(identity)) = (&self.trust, self.repo.collection_identity(name)) {
             let grant = CollectionGrant {
                 process_env: true,
@@ -2544,9 +2545,13 @@ mod trust_tests {
 
     #[test]
     fn a_cloned_collection_has_no_vault_access() {
-        let (dir, _svc, store) = setup();
-        // A clone or import writes the folder without going through `create`, so no record exists.
+        let (dir, svc, store) = setup();
+        // A collection made through `create` is the control: it has both flags.
+        svc.create("made").expect("create");
         let repo = FsCollectionRepo::new_standalone(dir.path().join("collections"));
+        let made = crate::effective_capabilities(&repo, store.as_ref(), "made");
+        assert!(made.vault_values && made.vault_certificates);
+        // A clone or import writes the folder without going through `create`, so no record exists.
         repo.create("cloned").expect("create folder");
         let eff = crate::effective_capabilities(&repo, store.as_ref(), "cloned");
         assert!(!eff.vault_values && !eff.vault_certificates);

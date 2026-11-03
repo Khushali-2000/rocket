@@ -168,6 +168,7 @@ Plan 1 ships first because it closes the real hole.
 
 rok parity B adds `rok.sendRequest` and `rok.runRequest`, and both work in Safe mode, like Bruno (user ruling). This widens the threat model above. Safe mode is where untrusted collections run, so a script from a cloned or imported collection can now send environment values, RocketVault values and response data to any host it names. The trust gate does not stop this.
 
+- Update (2026-11-05): RocketVault values and certificates now have their own per-collection trust gate (`2026-11-05-rocketvault-trust-gate-design.md`). A denied collection's script gets unresolved placeholders.
 - Script requests reuse the calling request's TLS, proxy and client-certificate settings. A client certificate is only presented when its domain matches the host the script picked, as for any send.
 - Console lines and rejection messages mask secret values. The requests themselves carry the real values.
 - Mitigations to consider later: show script-originated requests in History with a badge, and have the static scanner flag `rok.sendRequest`, `rok.runRequest` and, with part C, `rok.cookies.jar`.
