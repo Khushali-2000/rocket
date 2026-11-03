@@ -151,6 +151,10 @@ pub struct ExecuteRequestInput {
     /// from IPC is always false: the field is never read from or written to the wire.
     #[serde(skip)]
     pub backend_process_env: bool,
+    /// Host values an earlier Flow node used. Masked like the send's own used values.
+    /// Never read from or written to the wire.
+    #[serde(skip)]
+    pub extra_mask_values: std::collections::HashSet<String>,
     /// The host environment a tab send may see in an inherited OAuth2 auth. The frontend
     /// resolves every other field itself. Closed when omitted.
     #[serde(default)]
@@ -2625,6 +2629,13 @@ impl RequestExecutionService {
         var_ctx
             .secret_values
             .extend(process_env.dot_env_values.iter().cloned());
+        // The used host values are fixed at the first resolution pass, so they are masked here.
+        var_ctx.secret_values.extend(crate::redaction::mask_forms(
+            process_env.used_values.iter().cloned(),
+        ));
+        var_ctx.secret_values.extend(crate::redaction::mask_forms(
+            input.extra_mask_values.iter().cloned(),
+        ));
         // The second pass compares against these values to find what the scripts changed.
         templates.nested_dynamic = nested_dynamic;
         templates.first_raw = var_ctx.flatten();
@@ -4735,6 +4746,7 @@ mod tests {
             request_guard_policy: rocket_workspace::RequestGuardPolicy::default(),
             run_source: rocket_shared::RunSource::Manual,
             backend_process_env: false,
+            extra_mask_values: Default::default(),
             process_env: Default::default(),
             literal: Default::default(),
         }
@@ -13914,6 +13926,109 @@ mod tests {
         let os_path = std::env::var("PATH").expect("PATH is set");
         assert!(output.run_process_env_values.contains(&os_path));
         assert!(!output.run_process_env_values.contains("abc123secret"));
+    }
+
+    /// An executor that fails and echoes the URL it was given.
+    struct EchoFailExecutor;
+
+    #[async_trait]
+    impl HttpExecutor for EchoFailExecutor {
+        async fn execute(&self, req: &HttpRequest) -> DomainResult<HttpResponse> {
+            Err(DomainError::Http(format!("connect failed: {}", req.url)))
+        }
+    }
+
+    /// A publisher that keeps the `RequestExecuted` URLs.
+    struct UrlRecorder(Arc<Mutex<Vec<String>>>);
+
+    impl rocket_shared::events::EventPublisher for UrlRecorder {
+        fn publish(&self, event: DomainEvent) {
+            if let DomainEvent::RequestExecuted { url, .. } = event {
+                self.0.lock().expect("lock").push(url);
+            }
+        }
+    }
+
+    /// A service for host-value masking tests, with the given executor and a URL recorder.
+    fn host_send_svc(
+        executor: Arc<dyn HttpExecutor>,
+    ) -> (
+        RequestExecutionService,
+        Arc<Mutex<Vec<HistoryEntry>>>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let history = MockHistoryRepo::new();
+        let handle = history.saved_entries_handle();
+        let urls = Arc::new(Mutex::new(Vec::new()));
+        let svc = RequestExecutionService::new(
+            Box::new(MockEnvRepo::empty()),
+            executor,
+            Box::new(history),
+            Box::new(StubCollectionRepo::empty()),
+            Box::new(NullCookieRepo),
+            Box::new(UrlRecorder(Arc::clone(&urls))),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        )
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all())
+        .with_collection_env_repo_factory(Box::new(DirEnvRepoFactory {
+            env: env_with_dot_env("dev", ".env"),
+            dir: std::path::PathBuf::from("/work"),
+        }))
+        .with_dot_env_loader(Box::new(SharedDotEnv(FakeDotEnv::new(&[(".env", &[])]))));
+        (svc, handle, urls)
+    }
+
+    #[tokio::test]
+    async fn history_url_hides_a_used_host_value() {
+        std::env::set_var("ROCKET_TEST_HOST_SEND", "host-secret-value-77");
+        let (svc, history, urls) = host_send_svc(Arc::new(MockExecutor::new(200)));
+        let input = backend_input("https://x.test/{{process.env.ROCKET_TEST_HOST_SEND}}");
+        svc.execute(input).await.expect("execute");
+        let saved = history.lock().expect("history");
+        assert_eq!(saved.len(), 1);
+        assert!(
+            !saved[0].url.contains("host-secret-value-77"),
+            "{}",
+            saved[0].url
+        );
+        let urls = urls.lock().expect("urls");
+        assert_eq!(urls.len(), 1);
+        assert!(!urls[0].contains("host-secret-value-77"), "{}", urls[0]);
+    }
+
+    #[tokio::test]
+    async fn executor_error_hides_a_used_host_value() {
+        std::env::set_var("ROCKET_TEST_HOST_SEND", "host-secret-value-77");
+        let (svc, _, _) = host_send_svc(Arc::new(EchoFailExecutor));
+        let input = backend_input("https://x.test/{{process.env.ROCKET_TEST_HOST_SEND}}");
+        let err = svc.execute(input).await.expect_err("the send fails");
+        assert!(!err.to_string().contains("host-secret-value-77"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn extra_mask_values_hide_an_upstream_value_in_the_history_url() {
+        let (svc, history, _) = host_send_svc(Arc::new(MockExecutor::new(200)));
+        let mut input = backend_input("https://x.test/upstream-host-value-9");
+        input.extra_mask_values = ["upstream-host-value-9".to_string()].into_iter().collect();
+        svc.execute(input).await.expect("execute");
+        let saved = history.lock().expect("history");
+        assert!(
+            !saved[0].url.contains("upstream-host-value-9"),
+            "{}",
+            saved[0].url
+        );
+    }
+
+    #[test]
+    fn extra_mask_values_never_cross_the_wire() {
+        let mut input = backend_input("https://x.test/");
+        input.extra_mask_values = ["upstream-host-value-9".to_string()].into_iter().collect();
+        let json = serde_json::to_string(&input).expect("serialize");
+        assert!(!json.contains("extra_mask_values"), "{json}");
+        assert!(!json.contains("extraMaskValues"), "{json}");
+        assert!(!json.contains("upstream-host-value-9"), "{json}");
     }
 
     fn withheld_input(source: rocket_shared::RunSource) -> ExecuteRequestInput {

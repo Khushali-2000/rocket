@@ -88,6 +88,27 @@ pub(crate) fn redaction_forms(value: &str) -> Vec<String> {
     forms
 }
 
+/// Every form of the given host values that must be masked.
+///
+/// For each value of `MIN_REDACTION_LEN` or more bytes this returns its `redaction_forms` plus the
+/// script-escaped and JSON-escaped form of each of them. Shorter values add nothing.
+pub(crate) fn mask_forms(values: impl IntoIterator<Item = String>) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for value in values {
+        if value.len() < MIN_REDACTION_LEN {
+            continue;
+        }
+        for form in redaction_forms(&value) {
+            out.insert(crate::flow_script_literals::escape_value(&form));
+            if let Some(json) = json_escaped_form(&form) {
+                out.insert(json);
+            }
+            out.insert(form);
+        }
+    }
+    out
+}
+
 /// Collects the forms of every secret value that the vault write guard looks for.
 ///
 /// These are the `redaction_forms` plus the percent-encoded whole value, so a value written
@@ -173,6 +194,28 @@ mod tests {
 
     fn set(values: &[&str]) -> HashSet<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn mask_forms_adds_escaped_and_json_forms() {
+        let raw = "pa\"ss\\word1";
+        let forms = mask_forms([raw.to_string()]);
+        assert!(forms.contains(raw));
+        assert!(forms.contains(&crate::flow_script_literals::escape_value(raw)));
+        assert!(forms.contains(&json_escaped_form(raw).unwrap()));
+    }
+
+    #[test]
+    fn mask_forms_splits_multi_line_values() {
+        let forms = mask_forms(["-----BEGIN KEY-----\nabcdefghij\n-----END KEY-----".to_string()]);
+        assert!(forms.contains("abcdefghij"));
+        // Armor lines are not masked alone, but the whole value still holds them.
+        assert!(forms.iter().any(|f| f.contains("-----BEGIN KEY-----")));
+    }
+
+    #[test]
+    fn mask_forms_skips_short_values() {
+        assert!(mask_forms(["abc12".to_string()]).is_empty());
     }
 
     #[test]

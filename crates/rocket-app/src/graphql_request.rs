@@ -331,6 +331,7 @@ pub(crate) mod test_support {
             skip_folder_scripts: false,
             run_source: rocket_shared::RunSource::Manual,
             backend_process_env: false,
+            extra_mask_values: Default::default(),
             process_env: Default::default(),
             literal: Default::default(),
             method: HttpMethod::Post,

@@ -23,7 +23,7 @@ use crate::flow_partial::{PartialPlan, PartialRun};
 use crate::flow_routing::{decide_fate, NodeFate, NodeOutcome};
 use crate::flow_run_cache::{CachedRun, FlowRunCache, RunResults};
 use crate::process_env::ProcessEnv;
-use crate::redaction::MIN_REDACTION_LEN;
+use crate::redaction::{mask_forms, MIN_REDACTION_LEN};
 use crate::runner_sequence::{build_step_input, RunItem};
 
 /// One node's fully-executed result, kept around so a downstream edge's
@@ -838,11 +838,10 @@ pub(crate) struct NodeRunContext {
 impl NodeRunContext {
     /// Records host values a node used, with their escaped forms.
     fn record_used_host_values(&self, values: impl IntoIterator<Item = String>) {
-        let mut added: HashSet<String> = values.into_iter().collect();
+        let added = mask_forms(values);
         if added.is_empty() {
             return;
         }
-        add_escaped_forms(&mut added);
         // A poisoned lock still holds a usable set, so masking carries on.
         let mut guard = self
             .used_host_values
@@ -1542,7 +1541,8 @@ impl FlowExecutionService {
                 .iter()
                 .cloned(),
         );
-        add_escaped_forms(&mut masking_secrets);
+        let escaped = mask_forms(masking_secrets.iter().cloned());
+        masking_secrets.extend(escaped);
         outcomes.retain(|id, _| !seeded.contains(id));
         captured.retain(|id, _| !seeded.contains(id));
         // Cached before `FlowRunFinished`, so a partial run started on that
@@ -1759,7 +1759,8 @@ impl FlowExecutionService {
         secret_values.extend(ctx.dot_env_values.iter().cloned());
         // A script source holds the escaped form of a value, and JSON.stringify holds the JSON
         // form, so those forms are masked too.
-        add_escaped_forms(&mut secret_values);
+        let escaped = mask_forms(secret_values.iter().cloned());
+        secret_values.extend(escaped);
         // Host values an earlier node used travel raw over a wire, so this node masks them.
         secret_values.extend(ctx.used_host_values());
         // Trace values are masked like an Output value: every secret variable
@@ -1997,7 +1998,8 @@ impl FlowExecutionService {
                         values.extend(ctx.dot_env_values.iter().cloned());
                         values.extend(script_scope.extra_masks().iter().cloned());
                         values.extend(ctx.used_host_values());
-                        add_escaped_forms(&mut values);
+                        let escaped = mask_forms(values.iter().cloned());
+                        values.extend(escaped);
                         request_secret_values = std::borrow::Cow::Owned(values);
                         request_secrets = std::borrow::Cow::Owned(secrets);
                     }
@@ -2352,22 +2354,6 @@ fn record_input_wire(
     }
 }
 
-/// Adds the script-escaped and JSON-escaped form of every value in `values`.
-fn add_escaped_forms(values: &mut HashSet<String>) {
-    let forms: Vec<String> = values
-        .iter()
-        .flat_map(|v| {
-            [
-                Some(crate::flow_script_literals::escape_value(v)),
-                crate::redaction::json_escaped_form(v),
-            ]
-        })
-        .flatten()
-        .filter(|f| !values.contains(f))
-        .collect();
-    values.extend(forms);
-}
-
 /// The variables one node's scripts fill `{{name}}` placeholders from.
 ///
 /// It is built once, on the first source that has a placeholder, and every wire
@@ -2467,9 +2453,7 @@ impl ScriptScope {
 
     /// Adds `values` with their escaped forms to the masks.
     fn add_masks(&mut self, values: impl IntoIterator<Item = String>) {
-        let mut added: HashSet<String> = values.into_iter().collect();
-        add_escaped_forms(&mut added);
-        self.masks.extend(added);
+        self.masks.extend(mask_forms(values));
     }
 }
 
