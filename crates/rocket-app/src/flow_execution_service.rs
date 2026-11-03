@@ -2011,6 +2011,9 @@ impl FlowExecutionService {
                 let external_secrets = request_secrets.as_ref();
                 let secret_values = request_secret_values.as_ref();
 
+                // Host values an earlier node used are masked in this send's history and errors.
+                request_input.extra_mask_values = ctx.used_host_values();
+
                 // Wires were resolved once above; every attempt reuses them.
                 if let Some(repeat) = repeat_until {
                     return self
@@ -2030,7 +2033,14 @@ impl FlowExecutionService {
                             ctx,
                         )
                         .await
-                        .map(|node| node.with_sent_secret(sent_value));
+                        .map(|node| {
+                            if let CapturedOutput::Request(output) = &node.output {
+                                ctx.record_used_host_values(
+                                    output.run_process_env_values.iter().cloned(),
+                                );
+                            }
+                            node.with_sent_secret(sent_value)
+                        });
                 }
 
                 let mut sent = None;
@@ -2051,6 +2061,8 @@ impl FlowExecutionService {
                     *exchange = Some(cap_exchange(record));
                 }
                 let output = result?;
+                // Later nodes mask the host values this send used.
+                ctx.record_used_host_values(output.run_process_env_values.iter().cloned());
                 logs.extend(masked_flow_logs(
                     output.console_entries.clone(),
                     secret_values,
@@ -4575,7 +4587,7 @@ mod tests {
         let service = service_with_saved_request(
             auth_and_request_flow(false, vec![auth_wire()]),
             Auth::Basic {
-                username: "own".to_string(),
+                username: "in".to_string(),
                 password: "own".to_string(),
             },
         );
@@ -11549,6 +11561,156 @@ mod tests {
             .is_some_and(|v| v.contains(crate::redaction::REDACTED)));
     }
 
+    const UP_VALUE: &str = "upstream-host-value-9";
+
+    /// `host_env_exec`, but history lands in `history`.
+    fn host_env_exec_with_history(
+        executor: &Arc<RecordingExecutor>,
+        history: &Arc<InMemoryHistoryRepo>,
+    ) -> RequestExecutionService {
+        RequestExecutionService::new(
+            Box::new(NullEnvRepo),
+            Arc::new(SharedExecutor(Arc::clone(executor))),
+            Box::new(SharedHistoryRepo(Arc::clone(history))),
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        )
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all())
+        .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+    }
+
+    #[tokio::test]
+    async fn a_later_request_hides_an_upstream_host_value_in_its_history_url() {
+        std::env::set_var("ROCKET_TEST_HOST_UP", UP_VALUE);
+        let executor = RecordingExecutor::new();
+        let history = InMemoryHistoryRepo::new();
+        let exec = host_env_exec_with_history(&executor, &history);
+        let flow = Flow {
+            name: "up".to_string(),
+            nodes: vec![
+                input_node_with("i", "{{process.env.ROCKET_TEST_HOST_UP}}"),
+                request_flow_node("r", "https://api.example.com/base"),
+            ],
+            edges: vec![edge_from(
+                "e1",
+                "i",
+                handle::RESULT,
+                "r",
+                "url",
+                "return 'https://api.example.com/p/' + response.body;",
+            )],
+            callback_host: None,
+        };
+        let service = FlowExecutionService::new(
+            Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
+            Box::new(FakeCollectionRepo::new().build()),
+            Box::new(NullEventPublisher),
+        );
+
+        let summary = service.run(&exec, run_input("up")).await.expect("run");
+
+        assert!(
+            executor.sent_urls().iter().any(|u| u.contains(UP_VALUE)),
+            "the request sends the real value"
+        );
+        let entries = history.entries.lock().expect("lock").clone();
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].url.contains(UP_VALUE), "{}", entries[0].url);
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains(UP_VALUE), "{json}");
+    }
+
+    #[tokio::test]
+    async fn a_request_records_its_own_host_values_for_later_nodes() {
+        std::env::set_var("ROCKET_TEST_HOST_UP", UP_VALUE);
+        let executor = RecordingExecutor::new();
+        executor.set_body("api.example.com", &format!("token {UP_VALUE}"));
+        let exec = host_env_exec(&executor);
+        let flow = Flow {
+            name: "in".to_string(),
+            nodes: vec![
+                request_flow_node(
+                    "a",
+                    "https://api.example.com/{{process.env.ROCKET_TEST_HOST_UP}}",
+                ),
+                transform_node("t", "console.log('seen ' + response.body);\nreturn 'x';"),
+            ],
+            edges: vec![edge_from(
+                "e1",
+                "a",
+                handle::RESULT,
+                "t",
+                handle::INPUT,
+                "response.body",
+            )],
+            callback_host: None,
+        };
+        let summary = run_dev_flow(flow, &exec).await;
+
+        let shown = logs_and_traces(&summary);
+        assert!(shown.contains("seen"), "{shown}");
+        assert!(!shown.contains(UP_VALUE), "{shown}");
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains(UP_VALUE), "{json}");
+    }
+
+    #[tokio::test]
+    async fn a_multi_line_host_value_logged_line_by_line_is_masked() {
+        std::env::set_var(
+            "ROCKET_TEST_HOST_PEM",
+            "-----BEGIN TEST KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASC\n-----END TEST KEY-----",
+        );
+        let line = "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC";
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        let flow = Flow {
+            name: "in".to_string(),
+            nodes: vec![
+                input_node_with("i", "{{process.env.ROCKET_TEST_HOST_PEM}}"),
+                output_node_named("out"),
+            ],
+            edges: vec![edge_from(
+                "e1",
+                "i",
+                handle::RESULT,
+                "out",
+                "value",
+                "console.log(response.body.split('\\n')[1]);\nreturn 'x';",
+            )],
+            callback_host: None,
+        };
+
+        let summary = run_dev_flow(flow, &exec).await;
+
+        let step = step_of(&summary, "out");
+        assert!(!step.logs.is_empty(), "the wire script logged");
+        let shown = logs_and_traces(&summary);
+        assert!(!shown.contains(line), "{shown}");
+    }
+
+    #[test]
+    fn a_short_host_value_gets_no_escaped_forms() {
+        let (_handle, cancel) = cancel_pair();
+        let ctx = NodeRunContext {
+            run_id: "run-1".to_string(),
+            node_id: "n".to_string(),
+            cancel,
+            process_env: Default::default(),
+            dot_env_values: Default::default(),
+            used_host_values: Default::default(),
+        };
+        ctx.record_used_host_values(["ab\"cd".to_string()]);
+        assert!(ctx.used_host_values().is_empty());
+    }
+
     #[tokio::test]
     async fn a_value_no_node_used_stays_visible_downstream() {
         let executor = RecordingExecutor::new();
@@ -12447,7 +12609,7 @@ mod tests {
         let exec = host_env_exec(&executor);
         let service = fetched_token_service(
             Auth::Basic {
-                username: "own".to_string(),
+                username: "in".to_string(),
                 password: "own".to_string(),
             },
             vec![auth_wire()],
