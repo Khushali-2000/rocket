@@ -208,6 +208,17 @@ impl<'a> EnvironmentRepository for RefEnvRepo<'a> {
     }
 }
 
+/// What a capturing send records once its request is built, before it is sent.
+#[derive(Debug, Clone)]
+pub(crate) struct SendCapture {
+    /// The request as handed to the executor.
+    pub(crate) request: HttpRequest,
+    /// The send's own mask set, with its used host values in their mask forms.
+    pub(crate) masks: std::collections::HashSet<String>,
+    /// The host values the send used, as they are.
+    pub(crate) host_values: std::collections::HashSet<String>,
+}
+
 /// Extended response from `execute()` that includes HTTP response plus script outputs.
 #[derive(Clone)]
 pub struct ExecuteRequestOutput {
@@ -3103,11 +3114,11 @@ impl RequestExecutionService {
     /// its URL, or for its OAuth2 client-credentials token URL, is fetched first.
     pub(crate) async fn send_request(&self, state: &PhaseState) -> DomainResult<HttpResponse> {
         let request = self.with_vault_certificates(&state.http_request).await;
-        let response = self
-            .executor
-            .execute(&request)
-            .await
-            .map_err(|e| crate::redaction::redact_error(e, &state.var_ctx.secret_values))?;
+        let response = self.executor.execute(&request).await.map_err(|e| {
+            // A client may quote the URL re-encoded, so the encoded forms go too.
+            let forms = crate::redaction::url_secret_forms(&state.var_ctx.secret_values);
+            crate::redaction::redact_error(e, &forms)
+        })?;
 
         tracing::info!(
             status = response.status,
@@ -3494,11 +3505,11 @@ impl RequestExecutionService {
         external_secrets: &std::collections::HashMap<String, String>,
         unresolved: Vec<UnresolvedAlias>,
     ) -> DomainResult<ExecuteRequestOutput> {
-        let mut sent = None;
+        let mut capture = None;
         self.with_send_pins(self.execute_capturing_unpinned(
             input,
             external_secrets,
-            &mut sent,
+            &mut capture,
             unresolved,
         ))
         .await
@@ -3507,17 +3518,34 @@ impl RequestExecutionService {
     /// Runs the single-send path and records the request as it was handed to
     /// the executor, after the pre-request script ran. The record survives a
     /// failed send.
+    #[cfg(test)]
     pub(crate) async fn execute_capturing(
         &self,
         input: ExecuteRequestInput,
         external_secrets: &std::collections::HashMap<String, String>,
         sent: &mut Option<HttpRequest>,
     ) -> DomainResult<ExecuteRequestOutput> {
+        let mut capture = None;
+        let result = self
+            .execute_capturing_masked(input, external_secrets, &mut capture)
+            .await;
+        *sent = capture.map(|c| c.request);
+        result
+    }
+
+    /// Like `execute_capturing`, and the capture also holds the send's mask set
+    /// and used host values, so a failed send can still be recorded masked.
+    pub(crate) async fn execute_capturing_masked(
+        &self,
+        input: ExecuteRequestInput,
+        external_secrets: &std::collections::HashMap<String, String>,
+        capture: &mut Option<SendCapture>,
+    ) -> DomainResult<ExecuteRequestOutput> {
         // Flow callers enter here, so the send is pinned here as well as in `execute`.
         self.with_send_pins(self.execute_capturing_unpinned(
             input,
             external_secrets,
-            sent,
+            capture,
             Vec::new(),
         ))
         .await
@@ -3527,7 +3555,7 @@ impl RequestExecutionService {
         &self,
         input: ExecuteRequestInput,
         external_secrets: &std::collections::HashMap<String, String>,
-        sent: &mut Option<HttpRequest>,
+        capture: &mut Option<SendCapture>,
         unresolved: Vec<UnresolvedAlias>,
     ) -> DomainResult<ExecuteRequestOutput> {
         // Every phase runs unconditionally — this is the single-send path. The
@@ -3537,7 +3565,21 @@ impl RequestExecutionService {
         state.unresolved_aliases = Arc::new(unresolved);
         self.run_before_request_phase(&input, ExecutionMode::Standalone, &mut state)
             .await?;
-        *sent = Some(state.http_request.clone());
+        let mut host_values = state.process_env.used_values.clone();
+        // A poisoned lock still holds the values, and they must be masked.
+        host_values.extend(
+            state
+                .nested_process_env_values
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned(),
+        );
+        *capture = Some(SendCapture {
+            request: state.http_request.clone(),
+            masks: state.var_ctx.secret_values.clone(),
+            host_values,
+        });
         let response = self.send_request(&state).await?;
         self.run_after_response_phase(&input, ExecutionMode::Standalone, &response, &mut state)
             .await;
@@ -4353,7 +4395,11 @@ mod tests {
     fn host_exec_value() -> String {
         const VALUE: &str = "host-exec-value-6613";
         static SET: std::sync::Once = std::sync::Once::new();
-        SET.call_once(|| std::env::set_var("ROCKET_TEST_HOST_EXEC", VALUE));
+        SET.call_once(|| {
+            std::env::set_var("ROCKET_TEST_HOST_EXEC", VALUE);
+            std::env::set_var("ROCKET_TEST_HOST_SEND", "host-secret-value-77");
+            std::env::set_var("ROCKET_TEST_HOST_ENC", "enc value with spaces 31");
+        });
         VALUE.to_string()
     }
     use crate::client_certificates::describe_all;
@@ -13950,6 +13996,19 @@ mod tests {
         }
     }
 
+    /// An executor that fails and quotes the URL the way a client re-encodes it.
+    struct EncodedEchoFailExecutor;
+
+    #[async_trait]
+    impl HttpExecutor for EncodedEchoFailExecutor {
+        async fn execute(&self, req: &HttpRequest) -> DomainResult<HttpResponse> {
+            Err(DomainError::Http(format!(
+                "connect failed: {}",
+                req.url.replace(' ', "%20")
+            )))
+        }
+    }
+
     /// A publisher that keeps the `RequestExecuted` URLs.
     struct UrlRecorder(Arc<Mutex<Vec<String>>>);
 
@@ -13994,7 +14053,7 @@ mod tests {
 
     #[tokio::test]
     async fn history_url_hides_a_used_host_value() {
-        std::env::set_var("ROCKET_TEST_HOST_SEND", "host-secret-value-77");
+        host_exec_value();
         let (svc, history, urls) = host_send_svc(Arc::new(MockExecutor::new(200)));
         let input = backend_input("https://x.test/{{process.env.ROCKET_TEST_HOST_SEND}}");
         svc.execute(input).await.expect("execute");
@@ -14012,11 +14071,20 @@ mod tests {
 
     #[tokio::test]
     async fn executor_error_hides_a_used_host_value() {
-        std::env::set_var("ROCKET_TEST_HOST_SEND", "host-secret-value-77");
+        host_exec_value();
         let (svc, _, _) = host_send_svc(Arc::new(EchoFailExecutor));
         let input = backend_input("https://x.test/{{process.env.ROCKET_TEST_HOST_SEND}}");
         let err = svc.execute(input).await.expect_err("the send fails");
         assert!(!err.to_string().contains("host-secret-value-77"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn executor_error_hides_a_percent_encoded_host_value() {
+        host_exec_value();
+        let (svc, _, _) = host_send_svc(Arc::new(EncodedEchoFailExecutor));
+        let input = backend_input("https://x.test/{{process.env.ROCKET_TEST_HOST_ENC}}");
+        let err = svc.execute(input).await.expect_err("the send fails");
+        assert!(!err.to_string().contains("enc%20value"), "{err}");
     }
 
     #[tokio::test]

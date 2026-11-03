@@ -843,7 +843,7 @@ pub(crate) struct NodeRunContext {
 
 impl NodeRunContext {
     /// Records host values a node used, with their escaped forms.
-    fn record_used_host_values(&self, values: impl IntoIterator<Item = String>) {
+    pub(crate) fn record_used_host_values(&self, values: impl IntoIterator<Item = String>) {
         let added = mask_forms(values);
         if added.is_empty() {
             return;
@@ -2056,22 +2056,27 @@ impl FlowExecutionService {
                         });
                 }
 
-                let mut sent = None;
+                let mut capture = None;
                 let result = exec
-                    .execute_capturing(request_input, external_secrets, &mut sent)
+                    .execute_capturing_masked(request_input, external_secrets, &mut capture)
                     .await;
-                if let Some(sent) = &sent {
+                if let Some(capture) = &capture {
                     let error = result.as_ref().err().map(|e| e.to_string());
+                    // The send's own mask set holds its used host values, failed or not.
+                    let mut masks = secret_values.clone();
+                    masks.extend(capture.masks.iter().cloned());
                     let record = build_debug_request(
-                        sent,
+                        &capture.request,
                         result.as_ref().ok().map(|o| &o.response),
                         error.as_deref(),
-                        &sent_masks(secret_values, result.as_ref().ok()),
+                        &sent_masks(&masks, result.as_ref().ok()),
                     );
                     if *debug_on {
                         *debug = Some(record.clone());
                     }
                     *exchange = Some(cap_exchange(record));
+                    // Later nodes mask the host values even a failed send used.
+                    ctx.record_used_host_values(capture.host_values.iter().cloned());
                 }
                 let output = result?;
                 // Later nodes mask the host values this send used.
@@ -2633,6 +2638,11 @@ mod tests {
         SET.call_once(|| {
             std::env::set_var("ROCKET_TEST_HOST_FLOW_A", HOST_A_VALUE);
             std::env::set_var("ROCKET_TEST_HOST_FLOW_B", HOST_B_VALUE);
+            std::env::set_var("ROCKET_TEST_HOST_UP", "upstream-host-value-9");
+            std::env::set_var(
+                "ROCKET_TEST_HOST_PEM",
+                "-----BEGIN TEST KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASC\n-----END TEST KEY-----",
+            );
         });
     }
 
@@ -11671,7 +11681,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_later_request_hides_an_upstream_host_value_in_its_history_url() {
-        std::env::set_var("ROCKET_TEST_HOST_UP", UP_VALUE);
+        set_host_vars();
         let executor = RecordingExecutor::new();
         let history = InMemoryHistoryRepo::new();
         let exec = host_env_exec_with_history(&executor, &history);
@@ -11712,7 +11722,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_records_its_own_host_values_for_later_nodes() {
-        std::env::set_var("ROCKET_TEST_HOST_UP", UP_VALUE);
+        set_host_vars();
         let executor = RecordingExecutor::new();
         executor.set_body("api.example.com", &format!("token {UP_VALUE}"));
         let exec = host_env_exec(&executor);
@@ -11745,11 +11755,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_multi_line_host_value_logged_line_by_line_is_masked() {
-        std::env::set_var(
-            "ROCKET_TEST_HOST_PEM",
-            "-----BEGIN TEST KEY-----\nMIIBVgIBADANBgkqhkiG9w0BAQEFAASC\n-----END TEST KEY-----",
+    async fn a_failed_request_hides_its_own_host_value_in_its_record() {
+        set_host_vars();
+        let executor = RecordingExecutor::new();
+        executor.set_status("api.example.com", 0);
+        let exec = host_env_exec(&executor);
+        let mut node = request_flow_node(
+            "a",
+            "https://api.example.com/{{process.env.ROCKET_TEST_HOST_UP}}",
         );
+        if let FlowNodeKind::Request { debug, .. } = &mut node.kind {
+            *debug = true;
+        }
+        let flow = Flow {
+            name: "in".to_string(),
+            nodes: vec![node],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        let publisher = RecordingPublisher::new();
+        let service = service_with_publisher(flow, &publisher);
+        let input = RunFlowInput {
+            environment_name: Some("dev".to_string()),
+            ..run_input("in")
+        };
+        let summary = service.run(&exec, input).await.expect("run");
+
+        let step = step_of(&summary, "a");
+        assert!(step.error.is_some());
+        assert!(step.exchange.is_some());
+        assert!(step.debug_request.is_some());
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(json.contains("api.example.com"), "{json}");
+        assert!(!json.contains(UP_VALUE), "{json}");
+        let events = format!("{:?}", publisher.events());
+        assert!(!events.contains(UP_VALUE), "{events}");
+    }
+
+    /// One polling Request node whose response echoes the host value.
+    async fn run_echoing_poll(condition: &str) -> FlowRunSummary {
+        set_host_vars();
+        let executor = RecordingExecutor::new();
+        executor.set_body("api.example.com", UP_VALUE);
+        let exec = host_env_exec(&executor);
+        let mut node = request_flow_node(
+            "job",
+            "https://api.example.com/{{process.env.ROCKET_TEST_HOST_UP}}",
+        );
+        if let FlowNodeKind::Request { repeat_until, .. } = &mut node.kind {
+            *repeat_until = Some(repeat(condition, 100, 2, 10_000));
+        }
+        let flow = Flow {
+            name: "in".to_string(),
+            nodes: vec![node],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        run_dev_flow(flow, &exec).await
+    }
+
+    #[tokio::test]
+    async fn a_poll_condition_log_hides_the_attempts_host_value() {
+        let summary = run_echoing_poll("console.log(response.body); return true;").await;
+
+        let step = step_of(&summary, "job");
+        assert!(step
+            .logs
+            .iter()
+            .any(|l| l.message.contains(crate::redaction::REDACTED)));
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains(UP_VALUE), "{json}");
+    }
+
+    #[tokio::test]
+    async fn a_poll_condition_script_error_hides_the_attempts_host_value() {
+        let summary = run_echoing_poll("throw new Error(response.body);").await;
+
+        let step = step_of(&summary, "job");
+        let error = step.error.clone().expect("the condition throws");
+        assert!(!error.contains(UP_VALUE), "{error}");
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains(UP_VALUE), "{json}");
+    }
+
+    #[tokio::test]
+    async fn a_multi_line_host_value_logged_line_by_line_is_masked() {
+        set_host_vars();
         let line = "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC";
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
@@ -12636,8 +12727,9 @@ mod tests {
     }
 
     /// A flow whose client-credentials Auth node fetches
-    /// `{{process.env.ROCKET_TEST_HOST_FLOW_A}}` as its token, and a saved request `r` with `request_auth`. With no edges the node applies
-    /// to inherit; with edges it reaches `r` only through them.
+    /// `{{process.env.ROCKET_TEST_HOST_FLOW_A}}` as its token, and a saved
+    /// request `r` with `request_auth`. With no edges the node applies to
+    /// inherit; with edges it reaches `r` only through them.
     fn fetched_token_service(
         request_auth: rocket_shared::types::Auth,
         edges: Vec<FlowEdge>,

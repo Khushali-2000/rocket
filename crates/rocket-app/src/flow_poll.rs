@@ -108,18 +108,22 @@ impl FlowExecutionService {
 
             let mut attempt_input = request_input.clone();
             attempt_input.skip_history = true;
-            let mut sent = None;
+            let mut capture = None;
             let result = exec
-                .execute_capturing(attempt_input, external_secrets, &mut sent)
+                .execute_capturing_masked(attempt_input, external_secrets, &mut capture)
                 .await;
+            // The send's own masks hold its used host values, failed or not.
+            let mut masks = secret_values.clone();
             // Each attempt overwrites the record, so the step keeps the last one.
-            if let Some(sent) = &sent {
+            if let Some(capture) = &capture {
+                masks.extend(capture.masks.iter().cloned());
+                ctx.record_used_host_values(capture.host_values.iter().cloned());
                 let error = result.as_ref().err().map(|e| e.to_string());
                 let record = build_debug_request(
-                    sent,
+                    &capture.request,
                     result.as_ref().ok().map(|o| &o.response),
                     error.as_deref(),
-                    &sent_masks(secret_values, result.as_ref().ok()),
+                    &sent_masks(&masks, result.as_ref().ok()),
                 );
                 if debug_on {
                     *debug = Some(record.clone());
@@ -144,9 +148,11 @@ impl FlowExecutionService {
                 }
             };
             let status_code = output.response.status;
+            // The condition's logs and errors are masked with the attempt's own values too.
+            let masks = sent_masks(&masks, Some(&output)).into_owned();
             logs.extend(crate::flow_execution_service::masked_flow_logs(
                 output.console_entries.clone(),
-                secret_values,
+                &masks,
             ));
             let history = output.deferred_history.take();
             let captured = CapturedOutput::Request(Box::new(output));
@@ -157,15 +163,18 @@ impl FlowExecutionService {
                     &captured,
                     &repeat.condition,
                     FlowCoercion::Bool,
-                    secret_values,
+                    &masks,
                 )
                 .await;
             logs.extend(outcome.logs);
             let verdict = outcome.result.and_then(|raw| match raw.as_str() {
                 "true" => Ok(true),
                 "false" => Ok(false),
-                other => Err(DomainError::InvalidInput(format!(
-                    "repeat-until condition evaluated to '{other}', expected true or false"
+                other => Err(DomainError::InvalidInput(crate::redaction::redact_secrets(
+                    &format!(
+                        "repeat-until condition evaluated to '{other}', expected true or false"
+                    ),
+                    &masks,
                 ))),
             });
 
