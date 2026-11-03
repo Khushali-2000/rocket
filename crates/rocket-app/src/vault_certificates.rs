@@ -1142,4 +1142,63 @@ mod wiring_tests {
             "{seen:?}"
         );
     }
+
+    /// A Flow auth node token fetch for collection `c` over `gate`, with the idp certificate.
+    async fn flow_auth_fetch(
+        gate: Option<bool>,
+    ) -> (
+        Arc<FakeCertificateFetcher>,
+        Arc<RecordingTokenClientProvider>,
+    ) {
+        use crate::flow_auth::{FetchContext, FlowTokenFetcher, OAuth2ServiceFetcher};
+        let provider = Arc::new(RecordingTokenClientProvider::default());
+        let fetcher = FakeCertificateFetcher::new(&[("idp-cert", FakeExport::Ok)]);
+        let svc = oauth2_service(provider.clone()).with_vault_access(
+            Box::new(FakeSecretManagerRepo(connection())),
+            Arc::new(FakeSecretStore("client-secret".into())),
+            fetcher.clone(),
+        );
+        let mut token_fetcher = OAuth2ServiceFetcher::new(svc);
+        if let Some(allowed) = gate {
+            token_fetcher = token_fetcher.with_certificate_gate(Arc::new(move |collection| {
+                assert_eq!(collection, "c");
+                allowed
+            }));
+        }
+        let flow: rocket_shared::oauth2::OAuth2Flow = serde_json::from_value(serde_json::json!({
+            "flow": "client_credentials",
+            "accessTokenUrl": "https://idp.example.com/token",
+            "credentials": { "clientId": "id", "clientSecret": "s" }
+        }))
+        .expect("flow");
+        let ctx = FetchContext {
+            collection: "c".into(),
+            environment_name: Some("prod".into()),
+            ..FetchContext::default()
+        };
+        // The provider stops before the network, so the fetch itself fails.
+        let _ = token_fetcher.fetch_token(&flow, &ctx).await;
+        (fetcher, provider)
+    }
+
+    #[tokio::test]
+    async fn an_allowed_collection_flow_auth_token_fetch_exports_the_certificate() {
+        let (fetcher, provider) = flow_auth_fetch(Some(true)).await;
+        assert_eq!(fetcher.calls(), vec!["prod-vault/idp-cert/pkcs12"]);
+        let seen = provider.seen.lock().expect("lock").clone();
+        assert_eq!(seen[0][1], pkcs12_line("idp.example.com"));
+    }
+
+    #[tokio::test]
+    async fn a_denied_collection_flow_auth_token_fetch_never_exports() {
+        for gate in [Some(false), None] {
+            let (fetcher, provider) = flow_auth_fetch(gate).await;
+            assert!(fetcher.calls().is_empty());
+            let seen = provider.seen.lock().expect("lock").clone();
+            assert!(
+                seen[0][1].contains("RocketVault certificates are not allowed for this collection"),
+                "{seen:?}"
+            );
+        }
+    }
 }

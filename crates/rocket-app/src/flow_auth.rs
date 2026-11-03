@@ -300,11 +300,26 @@ pub(crate) async fn resolve_flow_credentials(
 /// Fetches tokens through the existing `OAuth2Service`.
 pub struct OAuth2ServiceFetcher {
     service: OAuth2Service,
+    /// Tells whether a collection may use RocketVault certificates. Without it, a selected
+    /// vault certificate is withheld (fail closed).
+    certificate_gate: Option<CertificateGate>,
 }
+
+/// Answers whether the named collection may use RocketVault certificates.
+pub type CertificateGate = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 impl OAuth2ServiceFetcher {
     pub fn new(service: OAuth2Service) -> Self {
-        Self { service }
+        Self {
+            service,
+            certificate_gate: None,
+        }
+    }
+
+    /// Lets a collection that the trust gate allows use its RocketVault certificates.
+    pub fn with_certificate_gate(mut self, gate: CertificateGate) -> Self {
+        self.certificate_gate = Some(gate);
+        self
     }
 }
 
@@ -312,9 +327,13 @@ impl OAuth2ServiceFetcher {
 impl FlowTokenFetcher for OAuth2ServiceFetcher {
     async fn fetch_token(&self, flow: &OAuth2Flow, ctx: &FetchContext) -> DomainResult<String> {
         let request = build_get_token_request(flow, ctx)?;
-        let config = self
+        let mut config = self
             .service
             .resolve_get_token_request_with_secrets(&request, &ctx.external_secrets);
+        config.allow_vault_certificates = self
+            .certificate_gate
+            .as_ref()
+            .is_some_and(|gate| gate(&ctx.collection));
         let token = self.service.get_token_direct(&config).await?;
         select_token(flow, token)
     }

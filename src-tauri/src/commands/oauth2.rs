@@ -329,7 +329,6 @@ pub async fn oauth2_get_token(
         )
     });
     let mut config = svc.resolve_get_token_request_with_host_env(&request, &secrets, &host_env);
-    // The trust store is read from disk, so keep it off the async workers.
     config.allow_vault_certificates = tokio::task::block_in_place(|| {
         exec.vault_certificates_allowed(request.collection.as_deref())
     });

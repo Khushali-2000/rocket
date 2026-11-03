@@ -821,9 +821,14 @@ pub fn run() {
             )))
             // Auth nodes fetch client-credentials and password tokens through the
             // same OAuth2 stack as the Authentication tab.
-            .with_token_fetcher(Box::new(
-                rocket_app::flow_auth::OAuth2ServiceFetcher::new(make_oauth2_service()),
-            ));
+            .with_token_fetcher(Box::new({
+                // The token fetch honours the collection's RocketVault certificate permission.
+                let gate_svc = Arc::clone(&mcp_exec_svc);
+                rocket_app::flow_auth::OAuth2ServiceFetcher::new(make_oauth2_service())
+                    .with_certificate_gate(Arc::new(move |collection| {
+                        gate_svc.vault_certificates_allowed(Some(collection))
+                    }))
+            }));
 
             let git_svc = GitAppService::new(
                 Box::new(rocket_git::Git2Service::new()),

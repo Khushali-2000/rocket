@@ -2879,3 +2879,69 @@ async fn an_allowed_collection_script_send_request_certificate_exports() {
     assert_eq!(fetcher.calls(), vec!["dev-vault/client-a/pem"]);
     assert!(side_certificate(&executor).starts_with("pem cert.test inline:"));
 }
+
+/// Runs `auth/login`, which sends to the certificate domain, from a send under `trust`.
+async fn nested_run_to_certificate_domain(
+    trust: Arc<crate::test_doubles::InMemoryTrustStore>,
+) -> (
+    Arc<KeepingExecutor>,
+    Arc<crate::test_doubles::FakeCertificateFetcher>,
+) {
+    let mut collection = main_and_login("await rok.runRequest('auth/login');", "", "");
+    for item in collection.root.items.iter_mut() {
+        if let CollectionItem::Folder(auth) = item {
+            for inner in auth.items.iter_mut() {
+                if let CollectionItem::Request(login) = inner {
+                    login.url = "https://cert.test/login.yml".to_string();
+                }
+            }
+        }
+    }
+    let input = send_input(&collection, "main.yml");
+    let fetcher = crate::test_doubles::FakeCertificateFetcher::new(&[(
+        "client-a",
+        crate::test_doubles::FakeExport::Ok,
+    )]);
+    let (svc, executor) = value_vault_service_with(
+        collection,
+        Vec::new(),
+        Arc::clone(&fetcher) as Arc<dyn VaultSecretFetcher>,
+        trust,
+    );
+    svc.execute(input).await.expect("execute");
+    (executor, fetcher)
+}
+
+/// The certificate the executor saw on the nested login request.
+fn login_certificate(executor: &KeepingExecutor) -> String {
+    let login = executor
+        .seen()
+        .into_iter()
+        .find(|r| r.url == "https://cert.test/login.yml")
+        .expect("login was sent");
+    crate::client_certificates::describe_all(&login.options.client_certificates)
+        .into_iter()
+        .find(|line| line.contains("cert.test"))
+        .expect("an entry for the domain")
+}
+
+#[tokio::test]
+async fn a_denied_collection_nested_run_request_certificate_never_exports() {
+    let (executor, fetcher) =
+        nested_run_to_certificate_domain(crate::test_doubles::InMemoryTrustStore::new()).await;
+    assert!(fetcher.calls().is_empty());
+    let line = login_certificate(&executor);
+    assert!(
+        line.contains("RocketVault certificates are not allowed for this collection"),
+        "{line}"
+    );
+}
+
+#[tokio::test]
+async fn an_allowed_collection_nested_run_request_certificate_exports_once() {
+    let (executor, fetcher) =
+        nested_run_to_certificate_domain(crate::test_doubles::InMemoryTrustStore::allow_all())
+            .await;
+    assert_eq!(fetcher.calls(), vec!["dev-vault/client-a/pem"]);
+    assert!(login_certificate(&executor).starts_with("pem cert.test inline:"));
+}
