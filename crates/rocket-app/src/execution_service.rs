@@ -14242,6 +14242,8 @@ mod tests {
                 context_roots: Vec::new(),
                 agent_run: false,
                 process_env: true,
+                vault_values: false,
+                vault_certificates: false,
                 source: rocket_collection::GrantSource::User,
             }))
         }

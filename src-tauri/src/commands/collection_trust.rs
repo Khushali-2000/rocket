@@ -11,6 +11,8 @@ pub enum CapabilityDto {
     DeveloperMode,
     AgentRun,
     ProcessEnv,
+    VaultValues,
+    VaultCertificates,
 }
 
 impl From<CapabilityDto> for Capability {
@@ -19,6 +21,8 @@ impl From<CapabilityDto> for Capability {
             CapabilityDto::DeveloperMode => Capability::DeveloperMode,
             CapabilityDto::AgentRun => Capability::AgentRun,
             CapabilityDto::ProcessEnv => Capability::ProcessEnv,
+            CapabilityDto::VaultValues => Capability::VaultValues,
+            CapabilityDto::VaultCertificates => Capability::VaultCertificates,
         }
     }
 }
@@ -56,6 +60,8 @@ pub struct CollectionTrustDto {
     pub context_roots: ContextRootsStateDto,
     pub agent_run: CapabilityStateDto,
     pub process_env: ProcessEnvStateDto,
+    pub vault_values: ProcessEnvStateDto,
+    pub vault_certificates: ProcessEnvStateDto,
     /// Any capability is requested and not granted.
     pub pending: bool,
     /// Identifies the request that was shown, for `grant_requested_capabilities`.
@@ -107,6 +113,12 @@ impl From<TrustStatus> for CollectionTrustDto {
             agent_run,
             process_env: ProcessEnvStateDto {
                 granted: grant.process_env,
+            },
+            vault_values: ProcessEnvStateDto {
+                granted: grant.vault_values,
+            },
+            vault_certificates: ProcessEnvStateDto {
+                granted: grant.vault_certificates,
             },
             pending,
             fingerprint: status.fingerprint,
@@ -279,6 +291,8 @@ mod tests {
             context_roots: vec!["shared".into(), "other".into()],
             agent_run: true,
             process_env: true,
+            vault_values: true,
+            vault_certificates: true,
             source: GrantSource::User,
         };
         let dto = CollectionTrustDto::from(status(asking_for_everything(), Some(grant)));
@@ -286,6 +300,25 @@ mod tests {
         assert!(dto.developer_mode.effective && dto.agent_run.effective);
         assert_eq!(dto.context_roots.effective, vec!["shared", "other"]);
         assert!(dto.process_env.granted);
+        assert!(dto.vault_values.granted && dto.vault_certificates.granted);
+    }
+
+    #[test]
+    fn a_missing_grant_shows_the_vault_flags_off() {
+        let dto = CollectionTrustDto::from(status(RequestedElevation::default(), None));
+        assert!(!dto.vault_values.granted && !dto.vault_certificates.granted);
+    }
+
+    #[test]
+    fn capability_dto_parses_the_vault_names() {
+        let values: CapabilityDto = serde_json::from_str("\"vaultValues\"").expect("values");
+        assert!(matches!(Capability::from(values), Capability::VaultValues));
+        let certs: CapabilityDto =
+            serde_json::from_str("\"vaultCertificates\"").expect("certificates");
+        assert!(matches!(
+            Capability::from(certs),
+            Capability::VaultCertificates
+        ));
     }
 
     #[test]

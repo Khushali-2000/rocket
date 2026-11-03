@@ -61,10 +61,19 @@ struct CollectionRecord {
     agent_run: bool,
     #[serde(default)]
     process_env: bool,
+    // A record from before the vault flags existed keeps vault access.
+    #[serde(default = "default_true")]
+    vault_values: bool,
+    #[serde(default = "default_true")]
+    vault_certificates: bool,
     #[serde(default)]
     source: String,
     #[serde(default)]
     updated_at: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl CollectionRecord {
@@ -76,6 +85,8 @@ impl CollectionRecord {
             context_roots: grant.context_roots,
             agent_run: grant.agent_run,
             process_env: grant.process_env,
+            vault_values: grant.vault_values,
+            vault_certificates: grant.vault_certificates,
             source: source_text(grant.source).to_string(),
             updated_at: chrono::Utc::now().to_rfc3339(),
         }
@@ -91,6 +102,8 @@ impl CollectionRecord {
             context_roots: self.context_roots.clone(),
             agent_run: self.agent_run,
             process_env: self.process_env,
+            vault_values: self.vault_values,
+            vault_certificates: self.vault_certificates,
             source: match self.source.as_str() {
                 "created" => GrantSource::Created,
                 "migrated" => GrantSource::Migrated,
@@ -322,6 +335,8 @@ mod tests {
             context_roots: vec!["../shared".into()],
             agent_run: false,
             process_env: true,
+            vault_values: true,
+            vault_certificates: true,
             source: GrantSource::User,
         }
     }
@@ -351,6 +366,34 @@ mod tests {
         assert!(yaml.contains("developer_mode: true"), "{yaml}");
         assert!(yaml.contains("version: 1"), "{yaml}");
         assert!(!yaml.contains("developerMode"), "{yaml}");
+        assert!(yaml.contains("vault_values: true"), "{yaml}");
+        assert!(yaml.contains("vault_certificates: true"), "{yaml}");
+
+        let off = CollectionGrant {
+            vault_values: false,
+            vault_certificates: false,
+            ..dev_grant()
+        };
+        store.put(&id("/a", Some("u1")), off.clone()).expect("put");
+        assert_eq!(
+            store.grant_for(&id("/a", Some("u1"))).expect("read"),
+            Some(off)
+        );
+    }
+
+    #[test]
+    fn an_old_record_without_vault_keys_loads_both_allowed() {
+        let (dir, store) = store();
+        fs::write(
+            dir.path().join("trust.yml"),
+            "version: 1\ncollections:\n- root: /a\n  process_env: true\n",
+        )
+        .expect("write");
+        let grant = store
+            .grant_for(&id("/a", None))
+            .expect("read")
+            .expect("grant");
+        assert!(grant.vault_values && grant.vault_certificates);
     }
 
     #[test]

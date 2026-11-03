@@ -51,6 +51,10 @@ pub struct CollectionGrant {
     pub context_roots: Vec<String>,
     pub agent_run: bool,
     pub process_env: bool,
+    /// Lets the collection read RocketVault values. Grant-only, the file cannot ask for it.
+    pub vault_values: bool,
+    /// Lets the collection read RocketVault certificates. Grant-only like `vault_values`.
+    pub vault_certificates: bool,
     pub source: GrantSource,
 }
 
@@ -61,6 +65,8 @@ pub struct EffectiveCapabilities {
     pub context_roots: Vec<String>,
     pub agent_run: bool,
     pub process_env: bool,
+    pub vault_values: bool,
+    pub vault_certificates: bool,
 }
 
 impl EffectiveCapabilities {
@@ -71,6 +77,8 @@ impl EffectiveCapabilities {
             context_roots: Vec::new(),
             agent_run: false,
             process_env: false,
+            vault_values: false,
+            vault_certificates: false,
         }
     }
 }
@@ -108,6 +116,8 @@ pub fn resolve_effective(
         context_roots,
         agent_run: req.agent_run && grant.agent_run,
         process_env: grant.process_env,
+        vault_values: grant.vault_values,
+        vault_certificates: grant.vault_certificates,
     }
 }
 
@@ -247,6 +257,7 @@ mod tests {
             agent_run: agent,
             process_env: env,
             source: GrantSource::User,
+            ..Default::default()
         }
     }
 
@@ -330,6 +341,22 @@ mod tests {
         let off = grant(false, &[], false, false);
         assert!(resolve_effective(&req(false, &[], false), Some(&on)).process_env);
         assert!(!resolve_effective(&req(false, &[], false), Some(&off)).process_env);
+    }
+
+    #[test]
+    fn vault_flags_follow_the_grant_only() {
+        let on = CollectionGrant {
+            vault_values: true,
+            vault_certificates: true,
+            ..Default::default()
+        };
+        let eff = resolve_effective(&req(false, &[], false), Some(&on));
+        assert!(eff.vault_values && eff.vault_certificates);
+        let off = CollectionGrant::default();
+        let eff = resolve_effective(&req(true, &[], true), Some(&off));
+        assert!(!eff.vault_values && !eff.vault_certificates);
+        let none = EffectiveCapabilities::untrusted();
+        assert!(!none.vault_values && !none.vault_certificates);
     }
 
     #[test]

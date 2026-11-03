@@ -88,6 +88,8 @@ impl rocket_collection::CollectionTrustStore for InMemoryTrustStore {
                 context_roots: vec!["../shared".into()],
                 agent_run: true,
                 process_env: true,
+                vault_values: true,
+                vault_certificates: true,
                 source: rocket_collection::GrantSource::User,
             }));
         }

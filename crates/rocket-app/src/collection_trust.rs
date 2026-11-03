@@ -51,6 +51,10 @@ pub enum Capability {
     ContextRoots,
     AgentRun,
     ProcessEnv,
+    /// Grant-only, the collection file cannot ask for it.
+    VaultValues,
+    /// Grant-only, the collection file cannot ask for it.
+    VaultCertificates,
 }
 
 /// Requested, granted and effective values of one collection.
@@ -119,6 +123,8 @@ impl CollectionTrustService {
             Capability::DeveloperMode => grant.developer_mode = enabled,
             Capability::AgentRun => grant.agent_run = enabled,
             Capability::ProcessEnv => grant.process_env = enabled,
+            Capability::VaultValues => grant.vault_values = enabled,
+            Capability::VaultCertificates => grant.vault_certificates = enabled,
             Capability::ContextRoots => {
                 return Err(DomainError::InvalidInput(
                     "context roots are set with set_context_roots".into(),
@@ -191,6 +197,8 @@ impl CollectionTrustService {
                 }
                 Capability::AgentRun => grant.agent_run = requested.agent_run,
                 Capability::ProcessEnv => grant.process_env = true,
+                // The vault flags are grant-only, so a request never changes them.
+                Capability::VaultValues | Capability::VaultCertificates => {}
             }
         }
         self.store.put(&identity, grant)?;
@@ -239,6 +247,8 @@ impl CollectionTrustService {
                     context_roots: dedup_roots(&req.context_roots),
                     agent_run: req.agent_run,
                     process_env: true,
+                    vault_values: true,
+                    vault_certificates: true,
                     source: GrantSource::Migrated,
                 },
             ));
@@ -381,6 +391,50 @@ mod tests {
         assert!(svc
             .set_capability("c", Capability::ContextRoots, true)
             .is_err());
+    }
+
+    #[test]
+    fn vault_capabilities_are_set_and_revoked() {
+        let repo = ConfigurableCollectionRepo::new();
+        repo.set_settings("c", CollectionSettings::default());
+        let store = InMemoryTrustStore::new();
+        let svc = service(&repo, &store);
+
+        svc.set_capability("c", Capability::VaultValues, true)
+            .expect("values");
+        assert!(svc.effective("c").vault_values);
+        assert!(!svc.effective("c").vault_certificates);
+        svc.set_capability("c", Capability::VaultCertificates, true)
+            .expect("certificates");
+        assert!(svc.effective("c").vault_certificates);
+        svc.set_capability("c", Capability::VaultValues, false)
+            .expect("values off");
+        assert!(!svc.effective("c").vault_values);
+        assert!(svc.effective("c").vault_certificates);
+        svc.set_capability("c", Capability::VaultCertificates, false)
+            .expect("certificates off");
+        assert!(!svc.effective("c").vault_certificates);
+    }
+
+    #[test]
+    fn grant_requested_never_changes_the_vault_flags() {
+        let repo = ConfigurableCollectionRepo::new();
+        repo.set_settings("c", requesting_everything());
+        let store = InMemoryTrustStore::new();
+        let svc = service(&repo, &store);
+        let fingerprint = svc.status("c").expect("status").fingerprint;
+        svc.grant_requested(
+            "c",
+            &[
+                Capability::DeveloperMode,
+                Capability::VaultValues,
+                Capability::VaultCertificates,
+            ],
+            &fingerprint,
+        )
+        .expect("grant");
+        assert!(!svc.effective("c").vault_values);
+        assert!(!svc.effective("c").vault_certificates);
     }
 
     #[test]
@@ -615,6 +669,7 @@ mod tests {
 
         let plain = store.grant_of("plain").expect("plain grant");
         assert!(plain.process_env && !plain.developer_mode);
+        assert!(plain.vault_values && plain.vault_certificates);
         assert_eq!(plain.source, GrantSource::Migrated);
         let dev = store.grant_of("dev").expect("dev grant");
         assert!(dev.developer_mode && dev.process_env);
