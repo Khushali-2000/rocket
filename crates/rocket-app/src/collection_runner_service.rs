@@ -434,6 +434,7 @@ impl CollectionRunnerService {
             // runs either, so publish this step's console output directly. This request was
             // not sent, but a nested run its script started may have been.
             state.warn_if_process_env_withheld(false);
+            state.warn_if_vault_withheld(false);
             exec.publish_console(&item.name, &state.console);
             *carried_runtime = state.var_ctx.runtime.clone();
             return StepOutcome {
@@ -2036,5 +2037,71 @@ mod tests {
         );
         // Only the step that was sent says so.
         assert_eq!(withheld_lines(&publisher.events()), 1);
+    }
+
+    #[tokio::test]
+    async fn a_denied_runner_warns_once_per_step_that_references_a_vault_alias() {
+        let mut collection = Collection::new("my-api");
+        for (name, path, url) in [
+            ("First", "first.yml", "https://api.test/{{payments.apiKey}}"),
+            (
+                "Second",
+                "second.yml",
+                "https://api.test/{{payments.apiKey}}",
+            ),
+            ("Third", "third.yml", "https://api.test/{{host}}"),
+        ] {
+            let mut r = req(name, path);
+            r.url = url.into();
+            collection.root.add_request(r);
+        }
+        let repo = InMemoryCollectionRepo::new(collection);
+        let executor = RecordingExecutor::new();
+        let publisher = RecordingPublisher::new();
+        let exec = RequestExecutionService::new(
+            Box::new(NullEnvRepo),
+            Arc::new(SharedExecutor(Arc::clone(&executor))),
+            Box::new(SharedHistoryRepo(InMemoryHistoryRepo::new())),
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(NullCookieRepo),
+            Box::new(SharedPublisher(Arc::clone(&publisher))),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        )
+        .with_script_engine(Box::new(SharedEngine(ProgrammableEngine::new())))
+        .with_trust_store(crate::test_doubles::InMemoryTrustStore::new())
+        .with_collection_env_repo_factory(Box::new(StaticCollectionEnvRepoFactory(
+            environment_with_one_external_secret_binding(),
+        )));
+        let runner = CollectionRunnerService::new(
+            Box::new(SharedCollectionRepo(Arc::clone(&repo))),
+            Box::new(rocket_shared::events::NullEventPublisher),
+        );
+        let mut input = sample_run_input();
+        input.environment_name = Some("prod".to_string());
+
+        let summary = runner.run(&exec, input).await.expect("run");
+
+        assert_eq!(summary.steps.len(), 3);
+        assert_eq!(vault_lines(&publisher.events()), 2);
+    }
+
+    /// The `ConsoleOutput` lines of `events` that say a RocketVault placeholder was withheld.
+    fn vault_lines(events: &[rocket_shared::events::DomainEvent]) -> usize {
+        events
+            .iter()
+            .map(|event| match event {
+                rocket_shared::events::DomainEvent::ConsoleOutput { entries, .. } => entries
+                    .iter()
+                    .filter(|e| {
+                        e["message"]
+                            .as_str()
+                            .is_some_and(|m| m.starts_with("RocketVault values are not allowed"))
+                    })
+                    .count(),
+                _ => 0,
+            })
+            .sum()
     }
 }

@@ -1201,6 +1201,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: None,
         }
     }

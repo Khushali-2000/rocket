@@ -151,6 +151,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: None,
         };
         let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");
@@ -170,6 +171,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: None,
         };
         let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");
@@ -198,6 +200,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: Some(sent),
         };
         let json = serde_json::to_value(ExecuteRequestResponse::from(out)).expect("serialize");

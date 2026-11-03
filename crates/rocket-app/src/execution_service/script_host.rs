@@ -60,6 +60,8 @@ pub(crate) struct ExecutionScriptHost<'a> {
     pub(crate) nested_process_env_values: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Set when a nested run sent a `process.env` value the gate withheld.
     pub(crate) nested_withheld: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when a nested run sent a RocketVault placeholder the gate withheld.
+    pub(crate) nested_vault_withheld: Arc<std::sync::atomic::AtomicBool>,
     /// Set just before a nested run starts, so the calling phase reloads the scopes it saved.
     pub(crate) nested_ran: Arc<std::sync::atomic::AtomicBool>,
     /// Masked forms of the RocketVault values. An inherited value holding one is never laid
@@ -261,6 +263,10 @@ impl ScriptHost for ExecutionScriptHost<'_> {
         // The calling send writes the Console line, so it shows once.
         if output.process_env_withheld {
             self.nested_withheld
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if output.vault_withheld {
+            self.nested_vault_withheld
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let (runtime_set, runtime_removed) = runtime_changes(&request.runtime_vars, &runtime);

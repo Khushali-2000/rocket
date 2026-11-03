@@ -314,6 +314,7 @@ mod tests {
             run_sent_credentials: secrets(&["sent-token-123"]),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: None,
         };
         let mut sent = HttpRequest::new(

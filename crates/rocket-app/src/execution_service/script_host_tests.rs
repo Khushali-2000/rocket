@@ -2945,3 +2945,32 @@ async fn an_allowed_collection_nested_run_request_certificate_exports_once() {
     assert_eq!(fetcher.calls(), vec!["dev-vault/client-a/pem"]);
     assert!(login_certificate(&executor).starts_with("pem cert.test inline:"));
 }
+
+#[tokio::test]
+async fn a_denied_nested_run_request_warns_once_in_its_caller() {
+    let mut collection = main_and_login(
+        "await rok.runRequest('auth/login'); console.log('ran');",
+        "",
+        "",
+    );
+    login_uses_the_alias(&mut collection);
+    let input = send_input(&collection, "main.yml");
+    let fetcher = crate::test_doubles::FakeVaultSecretFetcher::new(
+        [("sec-1".to_string(), "vault-value-123456".to_string())].into(),
+    );
+    let (svc, _) = value_vault_service_with(
+        collection,
+        Vec::new(),
+        Arc::clone(&fetcher) as Arc<dyn VaultSecretFetcher>,
+        crate::test_doubles::InMemoryTrustStore::new(),
+    );
+    let out = svc.execute(input).await.expect("execute");
+    assert!(out.script_error.is_none(), "{:?}", out.script_error);
+    let lines = out
+        .console_entries
+        .iter()
+        .filter(|e| super::is_vault_withheld_entry(e))
+        .count();
+    assert_eq!(lines, 1, "{:?}", console(&out));
+    assert!(out.vault_withheld);
+}

@@ -242,6 +242,9 @@ pub struct ExecuteRequestOutput {
     /// True when the run, or a nested `rok.runRequest` run, sent a `{{process.env.NAME}}`
     /// the trust gate withheld. Never serialized to IPC. A caller adds the Console line.
     pub process_env_withheld: bool,
+    /// True when the run, or a nested `rok.runRequest` run, sent a RocketVault placeholder the
+    /// trust gate withheld. Never serialized to IPC. A caller adds the Console line.
+    pub vault_withheld: bool,
     /// The request as sent, after every pre-request phase, with RocketVault values masked.
     /// `None` when no request was sent.
     pub sent_request: Option<SentRequest>,
@@ -260,6 +263,7 @@ impl std::fmt::Debug for ExecuteRequestOutput {
             .field("run_sent_credentials", &self.run_sent_credentials.len())
             .field("run_process_env_values", &self.run_process_env_values.len())
             .field("process_env_withheld", &self.process_env_withheld)
+            .field("vault_withheld", &self.vault_withheld)
             .field("sent_request", &self.sent_request.is_some())
             .finish()
     }
@@ -498,6 +502,27 @@ pub(crate) fn is_process_env_withheld_entry(entry: &ConsoleEntry) -> bool {
     entry.level == expected.level && entry.message == expected.message
 }
 
+/// The Console line for a backend send whose RocketVault placeholder was left unresolved.
+/// `name` is the first withheld placeholder name, such as `vault.key`.
+pub(crate) fn vault_withheld_entry(name: &str) -> ConsoleEntry {
+    ConsoleEntry {
+        level: ConsoleLevel::Warn,
+        message: format!(
+            "RocketVault values are not allowed for this collection, so {{{{{name}}}}} was \
+             sent unresolved."
+        ),
+    }
+}
+
+/// Whether `entry` is a line `vault_withheld_entry` builds, whatever the name.
+#[cfg(test)]
+pub(crate) fn is_vault_withheld_entry(entry: &ConsoleEntry) -> bool {
+    entry.level == ConsoleLevel::Warn
+        && entry
+            .message
+            .starts_with("RocketVault values are not allowed for this collection, so {{")
+}
+
 /// What one send knows about the host environment (`{{process.env.NAME}}`).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SendProcessEnv {
@@ -507,6 +532,9 @@ pub(crate) struct SendProcessEnv {
     pub used_values: std::collections::HashSet<String>,
     /// The `process.env` names the templates reference while the gate is denied.
     pub withheld_names: Vec<String>,
+    /// The RocketVault placeholder names the templates reference while the gate is denied,
+    /// in first-seen order.
+    pub withheld_vault_names: Vec<String>,
 }
 
 /// Path parameters with the value `value` gives each template.
@@ -577,6 +605,9 @@ pub(crate) struct PhaseState {
     /// Set when a nested run withheld `process.env` values, so the caller's Console gets the
     /// warning too. Shared with the script host.
     pub nested_withheld: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when a nested run withheld a RocketVault placeholder, so the caller's Console gets
+    /// the warning too. Shared with the script host.
+    pub nested_vault_withheld: Arc<std::sync::atomic::AtomicBool>,
     /// Set when a script of this send started a `rok.runRequest`. The nested run saved its
     /// writes, so the pre-request loop reads the scopes back from storage. Shared with the
     /// script host.
@@ -601,6 +632,28 @@ impl PhaseState {
             || self
                 .nested_withheld
                 .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether a RocketVault placeholder the gate withheld was sent: by this request when
+    /// `sent` is true, or by a nested `rok.runRequest` run either way.
+    pub(crate) fn vault_withheld(&self, sent: bool) -> bool {
+        (sent && !self.process_env.withheld_vault_names.is_empty())
+            || self
+                .nested_vault_withheld
+                .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Adds the RocketVault withheld warning to this send's Console. A nested run leaves it to
+    /// its caller. A name from a nested run is not known here, so the line shows the alias form.
+    pub(crate) fn warn_if_vault_withheld(&mut self, sent: bool) {
+        if !self.nested && self.vault_withheld(sent) {
+            let name = self
+                .process_env
+                .withheld_vault_names
+                .first()
+                .map_or("alias.NAME", String::as_str);
+            self.console.push(vault_withheld_entry(name));
+        }
     }
 
     /// Adds the withheld warning to this send's Console. A nested run leaves it to its
@@ -861,6 +914,56 @@ impl RequestExecutionService {
             Some(failure) => Err(failure.error),
             None => Ok(result),
         }
+    }
+
+    /// The aliases of the active environment's RocketVault bindings, its parent chain's
+    /// included. Any error or a missing environment gives an empty set.
+    fn vault_binding_aliases(
+        &self,
+        collection: Option<&str>,
+        environment_name: Option<&str>,
+    ) -> std::collections::HashSet<String> {
+        let Some(name) = environment_name else {
+            return std::collections::HashSet::new();
+        };
+        let repo = self.regular_env_repo(collection);
+        let Ok(env) = repo.get(name) else {
+            return std::collections::HashSet::new();
+        };
+        match flatten_scope(&env, repo.as_ref()) {
+            Ok(flat) => flat
+                .external_secrets
+                .iter()
+                .map(|f| f.binding.alias.clone())
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        }
+    }
+
+    /// The first RocketVault placeholder of `text` that the trust gate withholds from
+    /// `collection`, or `None` when the gate allows vault values or the text names no bound
+    /// alias. Flow nodes use it for text they resolve themselves.
+    pub(crate) fn withheld_vault_name(
+        &self,
+        collection: Option<&str>,
+        environment_name: Option<&str>,
+        text: &str,
+    ) -> Option<String> {
+        if !text.contains("{{") || self.vault_values_allowed(collection) {
+            return None;
+        }
+        let aliases = self.vault_binding_aliases(collection, environment_name);
+        if aliases.is_empty() {
+            return None;
+        }
+        let template = FieldTemplate::record(
+            text,
+            false,
+            &std::collections::HashMap::new(),
+            &mut std::collections::HashSet::new(),
+        );
+        let name = template.vault_names(&aliases).next().map(str::to_string);
+        name
     }
 
     /// Like `resolve_external_secrets`, but a binding that fails to resolve
@@ -1717,11 +1820,31 @@ impl RequestExecutionService {
         let unresolved = RefCell::new(std::collections::HashSet::new());
         // The `process.env` names of the recorded fields (literal fields have none).
         let host_names = RefCell::new(std::collections::BTreeSet::new());
+        // The RocketVault names of the recorded fields while the gate is denied. The aliases
+        // are read only then, so an allowed send pays nothing.
+        let vault_aliases = if self.vault_values_allowed(input.collection.as_deref()) {
+            std::collections::HashSet::new()
+        } else {
+            self.vault_binding_aliases(
+                input.collection.as_deref(),
+                input.environment_name.as_deref(),
+            )
+        };
+        let vault_names = RefCell::new(Vec::<String>::new());
+        let note_vault = |template: &FieldTemplate| {
+            let mut names = vault_names.borrow_mut();
+            for name in template.vault_names(&vault_aliases) {
+                if !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+        };
         let rec = |text: &str, json: bool| -> FieldTemplate {
             let template = FieldTemplate::record(text, json, &vars, &mut unresolved.borrow_mut());
             host_names
                 .borrow_mut()
                 .extend(template.process_env_names().map(str::to_string));
+            note_vault(&template);
             template
         };
         // A field a Flow wire or a fetched token filled is sent as written.
@@ -1768,6 +1891,7 @@ impl RequestExecutionService {
                     auth_host_names
                         .borrow_mut()
                         .extend(template.process_env_names().map(str::to_string));
+                    note_vault(&template);
                     template
                 }
                 None => field(&s, false, literal.auth),
@@ -1896,6 +2020,7 @@ impl RequestExecutionService {
                 .iter()
                 .filter_map(|k| process_env.vars.get(k).cloned())
                 .collect(),
+            withheld_vault_names: vault_names.into_inner(),
             ..SendProcessEnv::default()
         };
         // The gate decided once, in `process_env_for`, and that decision is used here too.
@@ -2260,6 +2385,7 @@ impl RequestExecutionService {
             calling_url: state.http_request.url.clone(),
             nested_process_env_values: Arc::clone(&state.nested_process_env_values),
             nested_withheld: Arc::clone(&state.nested_withheld),
+            nested_vault_withheld: Arc::clone(&state.nested_vault_withheld),
             nested_ran: Arc::clone(&state.nested_ran),
             vault_forms: state.vault_forms.clone(),
             pending: std::sync::Mutex::new(state.pending.clone()),
@@ -2767,6 +2893,7 @@ impl RequestExecutionService {
                 std::collections::HashSet::new(),
             )),
             nested_withheld: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            nested_vault_withheld: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nested_ran: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nested: false,
             pending: rocket_scripting::PendingWrites::default(),
@@ -3404,6 +3531,7 @@ impl RequestExecutionService {
 
         // The request was sent, so a withheld value gets its one Console line now.
         state.warn_if_process_env_withheld(true);
+        state.warn_if_vault_withheld(true);
 
         // ── Emit events ───────────────────────────────────────────────────────
         self.publish_console(&request_name, &state.console);
@@ -3480,6 +3608,7 @@ impl RequestExecutionService {
             run_sent_credentials: sent_credentials(&state.http_request),
             run_process_env_values,
             process_env_withheld: state.process_env_withheld(true),
+            vault_withheld: state.vault_withheld(true),
             sent_request: Some(sent_request_masked(
                 &http_request,
                 &vault_values,
@@ -5460,6 +5589,72 @@ mod tests {
 
         assert!(!fetcher.calls.lock().expect("lock calls").is_empty());
         assert_eq!(sent_url(&executor), "https://api.example.com/sk-gate-value");
+    }
+
+    fn vault_lines(entries: &[ConsoleEntry]) -> usize {
+        entries
+            .iter()
+            .filter(|e| is_vault_withheld_entry(e))
+            .count()
+    }
+
+    #[test]
+    fn vault_withheld_entry_is_a_warning_with_the_name_in_braces() {
+        let entry = vault_withheld_entry("vault.key");
+        assert_eq!(entry.level, ConsoleLevel::Warn);
+        assert_eq!(
+            entry.message,
+            "RocketVault values are not allowed for this collection, so {{vault.key}} was \
+             sent unresolved."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_send_that_uses_a_vault_alias_adds_one_console_line() {
+        let (svc, executor, _) = gate_svc(crate::test_doubles::InMemoryTrustStore::new());
+        let mut input = sample_input("https://x/{{vault.key}}", Some("prod"));
+        input.collection = Some("c".to_string());
+        let out = svc.execute(input).await.expect("execute");
+        assert_eq!(vault_lines(&out.console_entries), 1);
+        assert_eq!(out.console_entries.len(), 1);
+        let expected = vault_withheld_entry("vault.key");
+        assert_eq!(out.console_entries[0].level, expected.level);
+        assert_eq!(out.console_entries[0].message, expected.message);
+        assert_eq!(sent_url(&executor), "https://x/{{vault.key}}");
+        assert!(out.vault_withheld);
+    }
+
+    #[tokio::test]
+    async fn a_denied_send_without_a_vault_name_adds_no_line() {
+        let (svc, _, _) = gate_svc(crate::test_doubles::InMemoryTrustStore::new());
+        let mut input = sample_input("https://x/{{host}}", Some("prod"));
+        input.collection = Some("c".to_string());
+        let out = svc.execute(input).await.expect("execute");
+        assert_eq!(vault_lines(&out.console_entries), 0);
+        assert!(!out.vault_withheld);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_send_adds_no_vault_line() {
+        let (svc, executor, fetcher) =
+            gate_svc(crate::test_doubles::InMemoryTrustStore::allow_all());
+        let mut input = sample_input("https://x/{{vault.key}}", Some("prod"));
+        input.collection = Some("c".to_string());
+        let out = svc.execute(input).await.expect("execute");
+        assert_eq!(vault_lines(&out.console_entries), 0);
+        assert!(!out.vault_withheld);
+        assert!(!fetcher.calls.lock().expect("lock calls").is_empty());
+        assert_eq!(sent_url(&executor), "https://x/sk-gate-value");
+    }
+
+    #[tokio::test]
+    async fn a_dotted_variable_that_is_not_a_bound_alias_adds_no_line() {
+        let (svc, _, _) = gate_svc(crate::test_doubles::InMemoryTrustStore::new());
+        let mut input = sample_input("https://x/{{a.b}}", Some("prod"));
+        input.collection = Some("c".to_string());
+        let out = svc.execute(input).await.expect("execute");
+        assert_eq!(vault_lines(&out.console_entries), 0);
+        assert!(!out.vault_withheld);
     }
 
     #[tokio::test]

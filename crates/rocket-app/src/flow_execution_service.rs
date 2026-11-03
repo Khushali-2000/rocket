@@ -9,8 +9,8 @@ use rocket_shared::types::{Body, BodyMode, Header, HttpMethod};
 use rocket_shared::VariableValue;
 
 use crate::execution_service::{
-    process_env_withheld_entry, ExecuteRequestInput, ExecuteRequestOutput, RequestExecutionService,
-    FLOW_INLINE_PATH_PREFIX,
+    process_env_withheld_entry, vault_withheld_entry, ExecuteRequestInput, ExecuteRequestOutput,
+    RequestExecutionService, FLOW_INLINE_PATH_PREFIX,
 };
 use crate::flow_auth::{
     resolve_flow_credentials, FetchContext, FlowAuthTokens, FlowCredentials, FlowTokenFetcher,
@@ -1807,6 +1807,13 @@ impl FlowExecutionService {
                 if !ctx.process_env.allowed && names_process_env {
                     logs.extend(to_flow_logs(vec![process_env_withheld_entry()]));
                 }
+                if let Some(name) = exec.withheld_vault_name(
+                    Some(&input.collection),
+                    input.environment_name.as_deref(),
+                    value.data(),
+                ) {
+                    logs.extend(to_flow_logs(vec![vault_withheld_entry(&name)]));
+                }
                 let resolved = rocket_environment::resolve(value.data(), &vars).output;
                 // A host value the text named is masked in the step, like a `.env` value.
                 if names_process_env && ctx.process_env.allowed {
@@ -3080,6 +3087,7 @@ mod tests {
             run_sent_credentials: Default::default(),
             run_process_env_values: Default::default(),
             process_env_withheld: false,
+            vault_withheld: false,
             sent_request: None,
         }
     }
@@ -10741,6 +10749,101 @@ mod tests {
             }],
             callback_host: None,
         }
+    }
+
+    /// An exec over collection "my-api" whose environment `dev` binds the alias `vault`,
+    /// with the vault values gate allowed or denied.
+    fn vault_bound_exec(allow: bool, executor: &Arc<RecordingExecutor>) -> RequestExecutionService {
+        let mut env = env_with(&[]);
+        env.external_secrets
+            .push(rocket_environment::ExternalSecretBinding {
+                alias: "vault".to_string(),
+                connection_id: "conn-1".to_string(),
+                vault_name: "prod-vault".to_string(),
+                secret_names: vec![rocket_environment::ExternalSecretRef {
+                    name: "key".to_string(),
+                    secret_id: "sec-1".to_string(),
+                }],
+            });
+        let trust = if allow {
+            crate::test_doubles::InMemoryTrustStore::allow_all()
+        } else {
+            crate::test_doubles::InMemoryTrustStore::new()
+        };
+        RequestExecutionService::new(
+            Box::new(NullEnvRepo),
+            Arc::new(SharedExecutor(Arc::clone(executor))),
+            Box::new(NullHistoryRepo),
+            Box::new(crate::test_doubles::SharedCollectionRepo(
+                crate::test_doubles::InMemoryCollectionRepo::new(
+                    rocket_collection::Collection::new("my-api"),
+                ),
+            )),
+            Box::new(NullCookieRepo),
+            Box::new(NullEventPublisher),
+            Box::new(EmptySecretManagerRepo),
+            Arc::new(rocket_environment::NullSecretStore),
+            Arc::new(rocket_environment::NullVaultSecretFetcher),
+        )
+        .with_trust_store(trust)
+        .with_collection_env_repo_factory(Box::new(DirEnvFactory(Arc::new(std::sync::Mutex::new(
+            env,
+        )))))
+        .with_script_engine(Box::new(rocket_infra::scripting::DenoScriptEngine::new()))
+    }
+
+    fn vault_logs(step: &FlowStepResult) -> usize {
+        step.logs
+            .iter()
+            .filter(|l| {
+                l.message
+                    .starts_with("RocketVault values are not allowed for this collection")
+                    && matches!(l.level, FlowLogLevel::Warn)
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_flow_request_step_with_a_withheld_vault_alias_warns_in_its_logs() {
+        let flow = Flow {
+            name: "in".to_string(),
+            nodes: vec![request_flow_node(
+                "r",
+                "https://api.example.com/{{vault.key}}",
+            )],
+            edges: Vec::new(),
+            callback_host: None,
+        };
+        let executor = RecordingExecutor::new();
+        let exec = vault_bound_exec(false, &executor);
+
+        let summary = run_dev_flow(flow, &exec).await;
+
+        assert_eq!(
+            executor.sent_urls(),
+            vec!["https://api.example.com/{{vault.key}}".to_string()]
+        );
+        assert_eq!(vault_logs(step_of(&summary, "r")), 1);
+    }
+
+    #[tokio::test]
+    async fn a_flow_input_node_warns_only_for_a_vault_placeholder_when_withheld() {
+        let executor = RecordingExecutor::new();
+        let denied = vault_bound_exec(false, &executor);
+
+        let summary = run_dev_flow(input_to_output_flow("{{vault.key}}"), &denied).await;
+        assert_eq!(vault_logs(step_of(&summary, "i")), 1);
+        assert_eq!(
+            step_of(&summary, "out").value.as_deref(),
+            Some("{{vault.key}}")
+        );
+
+        let summary = run_dev_flow(input_to_output_flow("{{other.key}} {{host}}"), &denied).await;
+        assert_eq!(vault_logs(step_of(&summary, "i")), 0);
+
+        let allowed = vault_bound_exec(true, &executor);
+        let summary = run_dev_flow(input_to_output_flow("{{vault.key}}"), &allowed).await;
+        assert_eq!(vault_logs(step_of(&summary, "i")), 0);
     }
 
     #[tokio::test]

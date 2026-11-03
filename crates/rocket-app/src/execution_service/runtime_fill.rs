@@ -45,6 +45,17 @@ impl FieldTemplate {
             .filter_map(|n| n.strip_prefix("process.env."))
     }
 
+    /// The placeholder names of the text that start with `<alias>.` for a bound alias.
+    pub(crate) fn vault_names<'a>(
+        &'a self,
+        aliases: &'a HashSet<String>,
+    ) -> impl Iterator<Item = &'a str> {
+        self.names.iter().map(String::as_str).filter(move |n| {
+            n.split_once('.')
+                .is_some_and(|(alias, rest)| !rest.is_empty() && aliases.contains(alias))
+        })
+    }
+
     /// A field sent as written. It has no placeholders, so neither pass puts a value into it,
     /// and the runtime pass leaves it as it is after a script rewrote it.
     pub(crate) fn literal(text: &str) -> Self {
@@ -414,6 +425,21 @@ mod tests {
         let o = Overrides::between(&first, &now, &runtime);
         assert_eq!(o.values, vars(&[("b", "20"), ("fresh", "f"), ("r", "rv")]));
         assert_eq!(o.removed, HashSet::from(["gone".to_string()]));
+    }
+
+    #[test]
+    fn vault_names_yields_only_names_of_a_bound_alias() {
+        let mut unresolved = HashSet::new();
+        let t = FieldTemplate::record(
+            "{{vault.key}} {{ vault.other }} {{a.b}} {{vaultx.k}} {{vault}} {{process.env.X}}",
+            false,
+            &HashMap::new(),
+            &mut unresolved,
+        );
+        let aliases: HashSet<String> = ["vault".to_string()].into();
+        let names: Vec<&str> = t.vault_names(&aliases).collect();
+        assert_eq!(names, vec!["vault.key", "vault.other"]);
+        assert_eq!(t.vault_names(&HashSet::new()).count(), 0);
     }
 
     #[test]
