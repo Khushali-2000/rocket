@@ -508,6 +508,9 @@ pub fn run() {
                 Arc::new(rocket_infra::KeyringSecretStore::new_proxy()),
                 Arc::clone(&shared_proxy),
             );
+            let update_svc = rocket_app::UpdateService::new(Box::new(
+                rocket_infra::FsUpdateSettingsRepo::new(data_dir.join("update.yml")),
+            ));
             let executor: Arc<dyn rocket_http::HttpExecutor> = Arc::new(
                 ReqwestExecutor::with_allowed_base(Arc::clone(&active_workspace_path))
                     // The jar is read on every request and pinned once per response, so
@@ -900,6 +903,7 @@ pub fn run() {
             app.manage(template_svc);
             app.manage(cookie_svc);
             app.manage(proxy_svc);
+            app.manage(update_svc);
             app.manage(exec_svc);
             app.manage(rocket_app::graphql_schema::GraphQlSchemaCache::default());
             app.manage(secret_manager_svc);
@@ -1096,6 +1100,13 @@ pub fn run() {
             commands::cookies::clear_cookies,
             commands::proxy::get_proxy_settings,
             commands::proxy::save_proxy_settings,
+            commands::updates::check_for_update,
+            commands::updates::get_install_kind,
+            commands::updates::get_update_settings,
+            commands::updates::install_update,
+            commands::updates::restart_app,
+            commands::updates::set_update_auto_check,
+            commands::updates::skip_update_version,
             commands::app::get_app_data_dir,
             commands::app::is_compositing_disabled,
             commands::audit::list_audit_events,

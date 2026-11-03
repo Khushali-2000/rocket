@@ -30,5 +30,6 @@ pub mod runner;
 pub mod secret_managers;
 pub mod templates;
 pub mod ui_state;
+pub mod updates;
 pub mod websocket;
 pub mod workspaces;
