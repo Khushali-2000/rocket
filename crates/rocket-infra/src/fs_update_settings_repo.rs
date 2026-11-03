@@ -23,8 +23,11 @@ impl UpdateSettingsRepository for FsUpdateSettingsRepo {
             return Ok(UpdateSettings::default());
         }
         let text = fs::read_to_string(&self.path)?;
-        serde_yaml::from_str(&text)
-            .map_err(|e| DomainError::Internal(format!("Failed to parse the update settings: {e}")))
+        // A corrupt or empty file counts as the defaults, so the user can fix it from the UI.
+        Ok(serde_yaml::from_str(&text).unwrap_or_else(|_| {
+            tracing::warn!(path = %self.path.display(), "Update settings file is not valid, using defaults");
+            UpdateSettings::default()
+        }))
     }
 
     fn save(&self, settings: &UpdateSettings) -> DomainResult<()> {
@@ -72,11 +75,21 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_file_is_an_error() {
+    fn a_corrupt_file_loads_the_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("update.yml");
         fs::write(&path, "auto_check: [not, a, bool\n").expect("write");
-        assert!(FsUpdateSettingsRepo::new(path).load().is_err());
+        let loaded = FsUpdateSettingsRepo::new(path).load().expect("load");
+        assert_eq!(loaded, UpdateSettings::default());
+    }
+
+    #[test]
+    fn an_empty_file_loads_the_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("update.yml");
+        fs::write(&path, "").expect("write");
+        let loaded = FsUpdateSettingsRepo::new(path).load().expect("load");
+        assert_eq!(loaded, UpdateSettings::default());
     }
 
     #[test]

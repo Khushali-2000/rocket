@@ -119,8 +119,11 @@ pub fn start_update_checker(app: &AppHandle) {
                 tracing::error!(code = "update_service_missing", "update checker stopped");
                 return;
             };
-            // A read error counts as the default settings.
-            let settings = svc.settings().unwrap_or_default();
+            // An I/O error counts as the default settings.
+            let settings = svc.settings().unwrap_or_else(|e| {
+                tracing::warn!("Could not read the update settings: {e}");
+                UpdateSettings::default()
+            });
             if !settings.auto_check {
                 continue;
             }
@@ -172,6 +175,19 @@ async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Upd
     updater.check().await.map_err(|e| fail(&e))
 }
 
+/// Runs Rocket's exit cleanup before the installer ends the process.
+///
+/// On Windows the plugin calls `process::exit`, so `RunEvent::Exit` never runs. The
+/// cleanup blocks, so it runs on its own thread and not inside the async runtime.
+fn run_exit_cleanup(app: &AppHandle) {
+    let worker_app = app.clone();
+    let worker = std::thread::spawn(move || crate::shutdown_services(&worker_app));
+    if worker.join().is_err() {
+        tracing::warn!("The exit cleanup before the update install panicked");
+    }
+    app.cleanup_before_exit();
+}
+
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfoDto>, DomainError> {
     Ok(find_update(&app).await?.map(|u| info_from(&u)))
@@ -179,7 +195,18 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfoDto>, D
 
 #[tauri::command]
 pub async fn install_update(app: AppHandle, version: String) -> Result<(), DomainError> {
-    let update = find_update(&app).await?;
+    // The update must come from this updater, so its exit hook runs before the install.
+    let fail = |e: &dyn std::fmt::Display| {
+        tracing::warn!("Update check failed: {e}");
+        DomainError::Internal("Could not check for updates".into())
+    };
+    let hook_app = app.clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || run_exit_cleanup(&hook_app))
+        .build()
+        .map_err(|e| fail(&e))?;
+    let update = updater.check().await.map_err(|e| fail(&e))?;
     let Some(update) = update.filter(|u| matches_requested(&u.version, &version)) else {
         return Err(DomainError::InvalidInput(
             "The update changed. Check again.".into(),

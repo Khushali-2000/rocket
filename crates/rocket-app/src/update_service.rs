@@ -33,6 +33,8 @@ pub fn should_announce(settings: &UpdateSettings, current: &str, candidate: &str
 }
 
 /// The GitHub release page of a version.
+///
+/// Covered by tests here and mirrored by the frontend `openRelease`, which builds the same URL.
 pub fn release_url(version: &str) -> String {
     format!("{RELEASE_BASE}{}", strip_v(version))
 }
