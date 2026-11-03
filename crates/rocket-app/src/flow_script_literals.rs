@@ -343,4 +343,12 @@ mod tests {
     fn line_comment_ends_at_carriage_return() {
         assert_eq!(run("// x\r'{{username}}'"), "// x\r'ann'");
     }
+
+    #[test]
+    fn line_comment_ends_at_every_line_terminator() {
+        for end in ["\u{2028}", "\u{2029}", "\n"] {
+            let out = run(&format!("// {{{{username}}}}{end}'{{{{username}}}}'"));
+            assert_eq!(out, format!("// {{{{username}}}}{end}'ann'"));
+        }
+    }
 }

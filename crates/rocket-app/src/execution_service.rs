@@ -4347,6 +4347,15 @@ fn absolutize_upload_paths(mut body: Body, base: Option<&std::path::Path>) -> Bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sets a unique host variable to a fixed value and returns the value. It is
+    /// never removed, so parallel tests cannot race on it.
+    fn host_exec_value() -> String {
+        const VALUE: &str = "host-exec-value-6613";
+        static SET: std::sync::Once = std::sync::Once::new();
+        SET.call_once(|| std::env::set_var("ROCKET_TEST_HOST_EXEC", VALUE));
+        VALUE.to_string()
+    }
     use crate::client_certificates::describe_all;
     use async_trait::async_trait;
     use rocket_collection::{
@@ -8431,12 +8440,14 @@ mod tests {
         input.pre_request_script = Some("// pre".into());
         svc.execute(input).await.expect("execute failed");
 
-        // PATH exists in every test environment, so no env mutation is needed.
-        let expected = std::env::var("PATH").expect("PATH should be set");
+        let expected = host_exec_value();
         let contexts = capture.contexts();
         assert_eq!(contexts.len(), 1);
         assert_eq!(
-            contexts[0].variables.process_env.get("PATH"),
+            contexts[0]
+                .variables
+                .process_env
+                .get("ROCKET_TEST_HOST_EXEC"),
             Some(&expected)
         );
     }
@@ -13880,10 +13891,11 @@ mod tests {
 
     #[tokio::test]
     async fn os_value_beats_a_dot_env_value_in_a_backend_send() {
-        let (svc, executor, _, _) = process_env_svc(&[("PATH", "from-file")], true);
-        let input = backend_input("https://x.test/?p={{process.env.PATH}}");
+        let (svc, executor, _, _) =
+            process_env_svc(&[("ROCKET_TEST_HOST_EXEC", "from-file")], true);
+        let os_path = host_exec_value();
+        let input = backend_input("https://x.test/?p={{process.env.ROCKET_TEST_HOST_EXEC}}");
         svc.execute(input).await.expect("execute");
-        let os_path = std::env::var("PATH").expect("PATH is set");
         let url = sent_url(&executor);
         assert_eq!(url, format!("https://x.test/?p={os_path}"));
         assert!(!url.contains("from-file"));
@@ -13921,9 +13933,9 @@ mod tests {
     #[tokio::test]
     async fn used_os_value_is_reported_in_run_process_env_values() {
         let (svc, _, _, _) = process_env_svc(&[("ROCKET_T1_KEY", "abc123secret")], true);
-        let input = backend_input("https://x.test/?p={{process.env.PATH}}");
+        let os_path = host_exec_value();
+        let input = backend_input("https://x.test/?p={{process.env.ROCKET_TEST_HOST_EXEC}}");
         let output = svc.execute(input).await.expect("execute");
-        let os_path = std::env::var("PATH").expect("PATH is set");
         assert!(output.run_process_env_values.contains(&os_path));
         assert!(!output.run_process_env_values.contains("abc123secret"));
     }
@@ -14207,9 +14219,9 @@ mod tests {
     async fn the_gate_is_decided_once_per_send() {
         let (svc, executor, _, _) = process_env_svc(&[], true);
         let svc = svc.with_trust_store(Arc::new(FirstLookupTrustStore::default()));
-        let input = backend_input("https://x.test/?p={{process.env.PATH}}");
+        let os_path = host_exec_value();
+        let input = backend_input("https://x.test/?p={{process.env.ROCKET_TEST_HOST_EXEC}}");
         let output = svc.execute(input).await.expect("execute");
-        let os_path = std::env::var("PATH").expect("PATH is set");
         // The value was sent, so it is reported for masking and no line says otherwise.
         assert_eq!(sent_url(&executor), format!("https://x.test/?p={os_path}"));
         assert!(output.run_process_env_values.contains(&os_path));
@@ -14244,19 +14256,19 @@ mod tests {
             domain: "x.test".into(),
             pkcs12_file_path: "/certs/client.p12".into(),
             pkcs12_secret: None,
-            passphrase: Some("{{process.env.PATH}}".into()),
+            passphrase: Some("{{process.env.ROCKET_TEST_HOST_EXEC}}".into()),
         }];
         let (svc, _, _, _) = process_env_svc_with(env, &[], true);
-        let input = backend_input("https://x.test/a?p={{process.env.PATH}}");
+        let os_path = host_exec_value();
+        let input = backend_input("https://x.test/a?p={{process.env.ROCKET_TEST_HOST_EXEC}}");
         let resolved = svc
             .resolve_request(&input, &std::collections::HashMap::new())
             .expect("resolve_request");
-        let os_path = std::env::var("PATH").expect("PATH is set");
         // The request itself still resolves it; the certificate does not.
         assert_eq!(resolved.url, format!("https://x.test/a?p={os_path}"));
         assert_eq!(
             describe_all(&resolved.options.client_certificates),
-            ["pkcs12 x.test file:/certs/client.p12 pass:{{process.env.PATH}}"]
+            ["pkcs12 x.test file:/certs/client.p12 pass:{{process.env.ROCKET_TEST_HOST_EXEC}}"]
         );
     }
 

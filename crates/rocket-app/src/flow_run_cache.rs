@@ -554,13 +554,35 @@ fn hash_placeholders(
             continue;
         }
         let value = vars.get(name);
-        (name, value).hash(hasher);
+        (name, value.map(|v| dynamic_names_blanked(v))).hash(hasher);
         if let Some(value) = value {
             if depth < MAX_PLACEHOLDER_DEPTH && seen.insert(name.to_string()) {
                 hash_placeholders(value, vars, hasher, depth + 1, seen);
             }
         }
     }
+}
+
+/// `value` with every `{{$name}}` written as `{{$}}`, so which dynamic name a value
+/// holds does not change its hash.
+fn dynamic_names_blanked(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        if after[..end].trim().starts_with('$') {
+            out.push_str("{{$}}");
+        } else {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The external-secrets key under which a partial run masks a value from an
@@ -923,11 +945,27 @@ mod tests {
 
     #[test]
     fn a_dynamic_name_inside_a_value_keeps_the_hash_stable() {
-        let vars = HashMap::from([("A".to_string(), "id-{{$guid}}".to_string())]);
-        assert_eq!(
-            plain_placeholder_hash("{{A}}", &vars),
+        let hash = |value: &str| {
+            let vars = HashMap::from([("A".to_string(), value.to_string())]);
             plain_placeholder_hash("{{A}}", &vars)
-        );
+        };
+        assert_eq!(hash("x-{{$guid}}"), hash("x-{{$timestamp}}"));
+        assert_ne!(hash("x-{{$guid}}"), hash("y-{{$guid}}"));
+    }
+
+    #[test]
+    fn a_chain_deeper_than_the_cap_stops_following() {
+        let hash = |v8: &str, v10: &str| {
+            let mut vars: HashMap<String, String> = (0..8)
+                .map(|i| (format!("V{i}"), format!("{{{{V{}}}}}", i + 1)))
+                .collect();
+            vars.insert("V8".to_string(), v8.to_string());
+            vars.insert("V9".to_string(), "{{V10}}".to_string());
+            vars.insert("V10".to_string(), v10.to_string());
+            plain_placeholder_hash("{{V0}}", &vars)
+        };
+        assert_ne!(hash("a", "x"), hash("b", "x"));
+        assert_eq!(hash("a", "x"), hash("a", "y"));
     }
 
     #[test]
