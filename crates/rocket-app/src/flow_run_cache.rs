@@ -526,9 +526,10 @@ const MAX_PLACEHOLDER_DEPTH: usize = 8;
 /// Each name, in order, is hashed with its raw value from `vars`, or with
 /// nothing when `vars` has none. A value that names other variables is
 /// followed, to a depth limit and once per name, so a cycle ends. Dynamic `$`
-/// names are skipped, so the hash is stable. The caller passes plain scope
-/// values only: RocketVault and `process.env` values are not in `vars`, so a
-/// change to them goes unseen.
+/// names are skipped, and a `{{$name}}` inside a variable value is blanked, so
+/// swapping one dynamic name for another there does not change the hash. The
+/// caller passes plain scope values only: RocketVault and `process.env` values
+/// are not in `vars`, so a change to them goes unseen.
 pub(crate) fn plain_placeholder_hash(text: &str, vars: &HashMap<String, String>) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     hash_placeholders(text, vars, &mut hasher, 0, &mut HashSet::new());
@@ -955,17 +956,22 @@ mod tests {
 
     #[test]
     fn a_chain_deeper_than_the_cap_stops_following() {
-        let hash = |v8: &str, v10: &str| {
-            let mut vars: HashMap<String, String> = (0..8)
+        // V0..V7 chain on, V8 is hashed at the cap and not followed.
+        let hash = |v7: &str, v8: &str, v9: &str, v10: &str| {
+            let mut vars: HashMap<String, String> = (0..7)
                 .map(|i| (format!("V{i}"), format!("{{{{V{}}}}}", i + 1)))
                 .collect();
+            vars.insert("V7".to_string(), v7.to_string());
             vars.insert("V8".to_string(), v8.to_string());
-            vars.insert("V9".to_string(), "{{V10}}".to_string());
+            vars.insert("V9".to_string(), v9.to_string());
             vars.insert("V10".to_string(), v10.to_string());
             plain_placeholder_hash("{{V0}}", &vars)
         };
-        assert_ne!(hash("a", "x"), hash("b", "x"));
-        assert_eq!(hash("a", "x"), hash("a", "y"));
+        let base = hash("{{V8}}", "{{V9}}", "{{V10}}", "x");
+        assert_ne!(base, hash("{{V8}} ", "{{V9}}", "{{V10}}", "x"));
+        assert_ne!(base, hash("{{V8}}", "{{V9}} ", "{{V10}}", "x"));
+        assert_eq!(base, hash("{{V8}}", "{{V9}}", "{{V10}} ", "x"));
+        assert_eq!(base, hash("{{V8}}", "{{V9}}", "{{V10}}", "y"));
     }
 
     #[test]

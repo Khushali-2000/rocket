@@ -12635,8 +12635,8 @@ mod tests {
         );
     }
 
-    /// A flow whose client-credentials Auth node fetches `{{process.env.ROCKET_TEST_HOST_FLOW_A}}` as its
-    /// token, and a saved request `r` with `request_auth`. With no edges the node applies
+    /// A flow whose client-credentials Auth node fetches
+    /// `{{process.env.ROCKET_TEST_HOST_FLOW_A}}` as its token, and a saved request `r` with `request_auth`. With no edges the node applies
     /// to inherit; with edges it reaches `r` only through them.
     fn fetched_token_service(
         request_auth: rocket_shared::types::Auth,

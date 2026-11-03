@@ -156,7 +156,7 @@ hashed. A changed RocketVault or `process.env` value does not invalidate a
 cached run. Request nodes ignore variable changes in their own url, headers
 and body (decision D5), but the edge expressions into a Request node are
 hashed too, because the runtime resolves them (a deliberate exception for edge
-scripts only). Not detected: Request node variable value changes, folder and
+scripts only). A `{{$name}}` inside a variable value is blanked in the hash, so swapping one dynamic name for another there does not invalidate a cached run. Not detected: Request node variable value changes, folder and
 collection settings a saved request inherits, shared `.js` script files, and
 auth tokens supplied for the partial run (they are not compared with the base
 run's). Values the base run masked are masked again under `}}prev-run.<n>`
