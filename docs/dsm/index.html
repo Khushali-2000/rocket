@@ -97,7 +97,7 @@
   --panel-title-active-border: #000000;
   --panel-title-active-fg: #202020;
   --panel-title-inactive-fg: #606060;
-  --sidebar-bg: #FBFBFE;
+  --sidebar-bg: var(--elevation-raised-bg);
   --sidebar-border: #E1E3E5;
   --titlebar-bg: #FBFBFE;
   --titlebar-fg: #606060;
@@ -114,6 +114,16 @@
   --editor-line-number-active: #202020;
   --editor-widget-bg: #FBFBFE;
   --editor-widget-border: #E4E6E7;
+  --elevation-sunken-bg: #FFFFFF;
+  --elevation-surface-bg: #EEF0F4;
+  --elevation-raised-bg: #FBFBFE;
+  --elevation-overlay-bg: #FFFFFF;
+  --elevation-shadow-raised: 2px 0 4px rgba(0, 0, 0, 0.08), 4px 0 12px rgba(0, 0, 0, 0.05);
+  --elevation-shadow-raised-end: -2px 0 4px rgba(0, 0, 0, 0.08), -4px 0 12px rgba(0, 0, 0, 0.05);
+  --elevation-shadow-chrome: 0 2px 4px rgba(0, 0, 0, 0.06), 0 4px 10px rgba(0, 0, 0, 0.04);
+  --elevation-shadow-pinned: 0 -2px 4px rgba(0, 0, 0, 0.06), 0 -4px 10px rgba(0, 0, 0, 0.04);
+  --elevation-shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.12), 0 2px 5px rgba(0, 0, 0, 0.08);
+  --elevation-shadow-overlay: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.18);
   --editor-gutter-added: #467311;
   --editor-gutter-deleted: #AC0F06;
   --diff-inserted-text: rgba(88, 124, 12, 0.149);
@@ -160,7 +170,7 @@
 }
 
 :root[data-theme="dark"] {
-  --background: #181A1B;
+  --background: var(--elevation-surface-bg);
   --foreground: #D1D1D1;
   --card: #121314;
   --card-foreground: #D1D1D1;
@@ -202,7 +212,7 @@
   --tab-inactive-bg: #181A1B;
   --tab-active-border-top: #3A92BB;
   --toolbar-hover: rgba(255, 255, 255, 0.094);
-  --statusbar-bg: #181A1B;
+  --statusbar-bg: var(--elevation-surface-bg);
   --statusbar-border: #2A2B2C;
   --statusbar-item-hover: #252627;
   --statusbar-item-active: #4A4B4D;
@@ -238,14 +248,14 @@
   --list-highlight-fg: #539EC1;
   --list-error-fg: #F48571;
   --list-warning-fg: #E6BB79;
-  --panel-bg: #181A1B;
+  --panel-bg: var(--elevation-surface-bg);
   --panel-border: #2A2B2C;
   --panel-title-active-border: #3A92BB;
   --panel-title-active-fg: #BFBFBF;
   --panel-title-inactive-fg: #8C8C8C;
-  --sidebar-bg: #181A1B;
+  --sidebar-bg: var(--elevation-raised-bg);
   --sidebar-border: #2A2B2C;
-  --titlebar-bg: #181A1B;
+  --titlebar-bg: var(--elevation-surface-bg);
   --titlebar-fg: #8C8C8C;
   --titlebar-border: #2A2B2C;
   --notification-warning-fg: #CC9900;
@@ -260,6 +270,16 @@
   --editor-line-number-active: #BCBDBD;
   --editor-widget-bg: #202122;
   --editor-widget-border: #2A2B2C;
+  --elevation-sunken-bg: #121314;
+  --elevation-surface-bg: #181A1B;
+  --elevation-raised-bg: #181A1B;
+  --elevation-overlay-bg: #202122;
+  --elevation-shadow-raised: 2px 0 6px rgba(0, 0, 0, 0.28), 6px 0 16px rgba(0, 0, 0, 0.18);
+  --elevation-shadow-raised-end: -2px 0 6px rgba(0, 0, 0, 0.28), -6px 0 16px rgba(0, 0, 0, 0.18);
+  --elevation-shadow-chrome: 0 2px 4px rgba(0, 0, 0, 0.24), 0 4px 10px rgba(0, 0, 0, 0.15);
+  --elevation-shadow-pinned: 0 -2px 4px rgba(0, 0, 0, 0.24), 0 -4px 10px rgba(0, 0, 0, 0.15);
+  --elevation-shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 5px rgba(0, 0, 0, 0.2);
+  --elevation-shadow-overlay: 0 2px 6px rgba(0, 0, 0, 0.28), 0 8px 24px rgba(0, 0, 0, 0.4);
   --editor-gutter-added: #8BD5A0;
   --editor-gutter-deleted: #F48571;
   --diff-inserted-text: rgba(87, 171, 90, 0.302);
@@ -2053,7 +2073,14 @@ html, body {
           </div>
           <div class="dsm-card">
             <div class="component-label">Elevation</div>
-            <p class="f-note">Shadows are sparse (shadow-sm 11, shadow-xs 10, shadow 8, shadow-lg 4). Dialog uses shadow-lg; dropdown menus use shadow-[0_2px_8px_rgba(0,0,0,0.16)] with backdrop-blur-sm. [data-slot="card"] adds 0 1px 3px rgba(0,0,0,0.08) in light and a 1px --input ring in dark.</p>
+            <p class="f-note">Four levels: sunken (editor, Settings), default (the shell), raised (sidebar), overlay (menus, dialogs). Colours are VS Code 2026 tokens. Height is shown by a shadow and layering, never by a lighter fill. In dark, raised keeps the sidebar colour. Full rules in docs/features/elevation.md.</p>
+            <div class="spacing-row">
+              <div class="spacing-block"><div class="f-radius" style="width:64px;height:40px;background:var(--elevation-sunken-bg);border:1px solid var(--border)"></div><div class="spacing-val">sunken</div><div class="spacing-val f-sub">no shadow</div></div>
+              <div class="spacing-block"><div class="f-radius" style="width:64px;height:40px;background:var(--elevation-surface-bg);border:1px solid var(--border)"></div><div class="spacing-val">default</div><div class="spacing-val f-sub">no shadow</div></div>
+              <div class="spacing-block"><div class="f-radius" style="width:64px;height:40px;background:var(--elevation-raised-bg);box-shadow:var(--elevation-shadow-raised)"></div><div class="spacing-val">raised</div><div class="spacing-val f-sub">sidebar edge</div></div>
+              <div class="spacing-block"><div class="f-radius" style="width:64px;height:40px;background:var(--elevation-overlay-bg);box-shadow:var(--elevation-shadow-overlay)"></div><div class="spacing-val">overlay</div><div class="spacing-val f-sub">floating UI</div></div>
+            </div>
+            <p class="f-note">Shadow tokens: --elevation-shadow-raised and -raised-end (side panels), -chrome (rows over content, falls down), -pinned (status bar, falls up), -lift (primary button), -overlay (popover, dropdown, context menu, select, dialog, sheet, hover tip). All are black only, softer in dark. Use <code>.elevation-*</code> classes or <code>bg-elevation-*</code>; do not add a bg utility next to a class that sets a fill.</p>
           </div>
         </div>
       </section>
