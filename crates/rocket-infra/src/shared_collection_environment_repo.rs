@@ -37,9 +37,9 @@ impl SharedCollectionEnvironmentRepo {
     /// save preserves any existing `secret: true` variable's value instead
     /// of silently dropping it. Required for any caller that does a
     /// read-modify-write over a whole environment — e.g.
-    /// `McpToolService::set_env_var` — since `src-tauri/src/commands/
-    /// environments.rs::env_service_for` already establishes this exact
-    /// pattern for the equivalent single-collection case.
+    /// `McpToolService::set_env_var` — since `EnvironmentServices` (in
+    /// `rocket-app`) already establishes this exact pattern for the
+    /// equivalent single-collection case.
     pub fn with_secret_store(
         active_workspace_path: Arc<Mutex<PathBuf>>,
         secret_store: Arc<dyn SecretStore>,

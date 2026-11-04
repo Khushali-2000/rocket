@@ -26,6 +26,7 @@ pub mod cookie_service;
 mod duplicate_request_e2e_tests;
 pub mod env_audit;
 pub mod environment_service;
+pub mod environment_services;
 pub mod event_caps;
 pub mod execution_service;
 pub mod export_service;
@@ -119,6 +120,7 @@ pub use conversation_service::{
 };
 pub use cookie_service::CookieService;
 pub use environment_service::EnvironmentService;
+pub use environment_services::EnvironmentServices;
 pub use execution_service::websocket_resolution::{
     WebSocketConnectInput, WebSocketScope, WebSocketSendInput,
 };

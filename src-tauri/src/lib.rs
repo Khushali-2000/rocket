@@ -1,6 +1,7 @@
 mod audit_bridge;
 mod auth_browser;
 mod callback_adapter;
+mod import_wiring;
 #[cfg(test)]
 mod ipc_acl_tests;
 // `pub` so integration tests in `src-tauri/tests/` can drive command
@@ -900,7 +901,52 @@ pub fn run() {
             .with_stream_secrets(Arc::clone(&conversation_svc)
                 as Arc<dyn rocket_app::StreamSecretSource>);
 
+            // Collection export reads through the active workspace on every call, so one
+            // service serves all exports. Bruno export uses only the file source.
+            let export_svc = Arc::new(
+                rocket_app::collection_export_service::CollectionExportService::new(Box::new(
+                    rocket_infra::FsCollectionFileSource::new(Arc::clone(&active_workspace_path)),
+                ))
+                .with_collections(Box::new(SharedPathCollectionRepo::new(Arc::clone(
+                    &active_workspace_path,
+                ))))
+                .with_environments(Box::new(
+                    SharedCollectionEnvironmentRepo::with_secret_store(
+                        Arc::clone(&active_workspace_path),
+                        env_secret_store(),
+                    ),
+                )),
+            );
+
+            // Environment commands get a service per call from here. The factories follow
+            // the active workspace, and secret values go through the env keychain store.
+            let environment_services = {
+                let workspace = Arc::clone(&active_workspace_path);
+                rocket_app::EnvironmentServices::new(
+                    Arc::new(SharedCollectionEnvironmentRepo::with_secret_store(
+                        Arc::clone(&active_workspace_path),
+                        env_secret_store(),
+                    )),
+                    Arc::new(move || {
+                        Box::new(SharedPathEnvironmentRepo::with_secret_store(
+                            Arc::clone(&workspace),
+                            env_secret_store(),
+                        )) as Box<dyn rocket_environment::EnvironmentRepository>
+                    }),
+                    Arc::new(tauri_event_bus::TauriEventBus::new(app_handle.clone())),
+                    audit_publisher.clone(),
+                )
+            };
+
+            // The import commands build an `ImportService` for the workspace that is active
+            // at the time of the call, so the factory holds the shared path.
+            let import_factory =
+                import_wiring::ImportServiceFactory::new(Arc::clone(&active_workspace_path));
+
             // Register all services as Tauri managed state.
+            app.manage(environment_services);
+            app.manage(import_factory);
+            app.manage(export_svc);
             app.manage(collection_svc);
             app.manage(trust_svc);
             app.manage(contract_svc);

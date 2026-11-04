@@ -1,133 +1,49 @@
-use rocket_app::{EnvironmentService, RequestExecutionService, WorkspaceService};
-use rocket_audit::{
-    actor::AuditActor,
-    publisher::{NullSecurityAuditPublisher, SecurityAuditPublisher},
-};
+use rocket_app::{EnvironmentServices, RequestExecutionService, WorkspaceService};
 use rocket_environment::Environment;
-use rocket_infra::FsEnvironmentRepo;
 use rocket_shared::certificate::ClientCertificate;
-use rocket_shared::{
-    error::DomainError,
-    events::{EventPublisher, NullEventPublisher},
-};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, State};
-
-use crate::tauri_event_bus::TauriEventBus;
-
-/// Creates a fresh `EnvironmentService` scoped to a single collection.
-///
-/// Validates `collection` to prevent path traversal attacks before constructing
-/// the environment directory path.
-fn env_service_for(
-    collection: &str,
-    ws_path: &Path,
-    events: Box<dyn EventPublisher>,
-    audit: Arc<dyn SecurityAuditPublisher>,
-) -> Result<EnvironmentService, DomainError> {
-    // Reject names that could escape the workspace directory.
-    if collection.contains('\0')
-        || collection.starts_with('/')
-        || collection.starts_with('\\')
-        || Path::new(collection)
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-    {
-        return Err(DomainError::InvalidInput("invalid collection name".into()));
-    }
-    let env_dir = ws_path
-        .join("collections")
-        .join(collection)
-        .join("environments");
-    Ok(EnvironmentService::new_with_audit(
-        Box::new(FsEnvironmentRepo::with_secret_store(
-            env_dir,
-            crate::env_secret_store(),
-        )),
-        events,
-        audit,
-    )
-    .with_audit_actor(AuditActor::User))
-}
+use rocket_shared::error::DomainError;
+use std::sync::Mutex;
+use tauri::State;
 
 #[tauri::command]
 pub fn list_environments(
     collection: String,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<Vec<Environment>, DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
-    env_service_for(
-        &collection,
-        &ws,
-        Box::new(NullEventPublisher),
-        Arc::new(NullSecurityAuditPublisher),
-    )?
-    .list()
+    services.for_collection(&collection)?.list()
 }
 
 #[tauri::command]
 pub fn get_environment(
     collection: String,
     name: String,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<Environment, DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&name)?;
-    env_service_for(
-        &collection,
-        &ws,
-        Box::new(NullEventPublisher),
-        Arc::new(NullSecurityAuditPublisher),
-    )?
-    .get(&name)
+    services.for_collection(&collection)?.get(&name)
 }
 
 #[tauri::command]
 pub fn save_environment(
     collection: String,
     env: Environment,
-    app: AppHandle,
-    audit: State<'_, Arc<dyn SecurityAuditPublisher>>,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
     secret_managers: State<'_, rocket_app::SecretManagerService>,
 ) -> Result<(), DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&env.name)?;
-    env_service_for(
-        &collection,
-        &ws,
-        Box::new(TauriEventBus::new(app)),
-        Arc::clone(&audit),
-    )?
-    .save_with_capabilities(&env, &*secret_managers)
+    services
+        .for_collection(&collection)?
+        .save_with_capabilities(&env, &*secret_managers)
 }
 
 #[tauri::command]
 pub fn delete_environment(
     collection: String,
     name: String,
-    app: AppHandle,
-    audit: State<'_, Arc<dyn SecurityAuditPublisher>>,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<(), DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&name)?;
-    env_service_for(
-        &collection,
-        &ws,
-        Box::new(TauriEventBus::new(app)),
-        Arc::clone(&audit),
-    )?
-    .delete(&name)
+    services.for_collection(&collection)?.delete(&name)
 }
 
 #[tauri::command]
@@ -154,84 +70,41 @@ pub fn set_global_environment(
         .set_global_environment(name)
 }
 
-/// Creates an `EnvironmentService` scoped to the workspace-level environments directory.
-fn global_env_service(
-    ws_path: &Path,
-    events: Box<dyn EventPublisher>,
-    audit: Arc<dyn SecurityAuditPublisher>,
-) -> Result<EnvironmentService, DomainError> {
-    let env_dir = ws_path.join("environments");
-    Ok(EnvironmentService::new_with_audit(
-        Box::new(FsEnvironmentRepo::with_secret_store(
-            env_dir,
-            crate::env_secret_store(),
-        )),
-        events,
-        audit,
-    )
-    .with_audit_actor(AuditActor::User))
-}
-
 #[tauri::command]
 pub fn list_global_environments(
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<Vec<Environment>, DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
-    global_env_service(
-        &ws,
-        Box::new(NullEventPublisher),
-        Arc::new(NullSecurityAuditPublisher),
-    )?
-    .list()
+    services.global().list()
 }
 
 #[tauri::command]
 pub fn get_global_environment(
     name: String,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<Environment, DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&name)?;
-    global_env_service(
-        &ws,
-        Box::new(NullEventPublisher),
-        Arc::new(NullSecurityAuditPublisher),
-    )?
-    .get(&name)
+    services.global().get(&name)
 }
 
 #[tauri::command]
 pub fn save_global_environment(
     env: Environment,
-    app: AppHandle,
-    audit: State<'_, Arc<dyn SecurityAuditPublisher>>,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
     secret_managers: State<'_, rocket_app::SecretManagerService>,
 ) -> Result<(), DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&env.name)?;
-    global_env_service(&ws, Box::new(TauriEventBus::new(app)), Arc::clone(&audit))?
+    services
+        .global()
         .save_with_capabilities(&env, &*secret_managers)
 }
 
 #[tauri::command]
 pub fn delete_global_environment(
     name: String,
-    app: AppHandle,
-    audit: State<'_, Arc<dyn SecurityAuditPublisher>>,
-    workspace: State<'_, Arc<Mutex<PathBuf>>>,
+    services: State<'_, EnvironmentServices>,
 ) -> Result<(), DomainError> {
-    let ws = workspace
-        .lock()
-        .map_err(|_| DomainError::Internal("workspace lock poisoned".into()))?;
     Environment::validate_name(&name)?;
-    global_env_service(&ws, Box::new(TauriEventBus::new(app)), Arc::clone(&audit))?.delete(&name)
+    services.global().delete(&name)
 }
 
 /// One variable of a flattened environment, with the environment that defines it.

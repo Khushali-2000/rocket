@@ -1,14 +1,10 @@
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rocket_app::collection_export_service::{
     CollectionExportService, ExportOutput, PostmanExportOptions,
 };
 use rocket_export::ExportReport;
-use rocket_infra::{
-    FsCollectionFileSource, SharedCollectionEnvironmentRepo, SharedPathCollectionRepo,
-};
 use rocket_shared::error::DomainError;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -42,15 +38,10 @@ where
 pub async fn export_collection_bruno(
     collection: String,
     include_environments: bool,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    service: State<'_, Arc<CollectionExportService>>,
 ) -> Result<ExportResultDto, DomainError> {
-    let workspace = Arc::clone(&*workspace_path);
-    run_export(move || {
-        let service =
-            CollectionExportService::new(Box::new(FsCollectionFileSource::new(workspace)));
-        service.export_bruno(&collection, include_environments)
-    })
-    .await
+    let service = Arc::clone(&*service);
+    run_export(move || service.export_bruno(&collection, include_environments)).await
 }
 
 /// Choices of a Postman export, as the dialog sends them.
@@ -76,26 +67,11 @@ impl From<PostmanExportOptionsDto> for PostmanExportOptions {
 pub async fn export_collection_postman(
     collection: String,
     options: PostmanExportOptionsDto,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    service: State<'_, Arc<CollectionExportService>>,
 ) -> Result<ExportResultDto, DomainError> {
-    let workspace = Arc::clone(&*workspace_path);
+    let service = Arc::clone(&*service);
     let options = PostmanExportOptions::from(options);
-    run_export(move || {
-        let service = CollectionExportService::new(Box::new(FsCollectionFileSource::new(
-            Arc::clone(&workspace),
-        )))
-        .with_collections(Box::new(SharedPathCollectionRepo::new(Arc::clone(
-            &workspace,
-        ))))
-        .with_environments(Box::new(
-            SharedCollectionEnvironmentRepo::with_secret_store(
-                workspace,
-                crate::env_secret_store(),
-            ),
-        ));
-        service.export_postman(&collection, &options)
-    })
-    .await
+    run_export(move || service.export_postman(&collection, &options)).await
 }
 
 #[cfg(test)]

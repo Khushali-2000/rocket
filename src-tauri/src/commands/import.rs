@@ -2,39 +2,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rocket_app::OpenApiSyncService;
-use rocket_environment::{EnvironmentRepository, SecretStore};
+use rocket_environment::SecretStore;
 use rocket_http::SpecFetcher;
-use rocket_import::{
-    EnvironmentRepositoryFactory, GroupBy, ImportReport, ImportService, OpenApiImportResult,
-};
+use rocket_import::{GroupBy, ImportReport, OpenApiImportResult};
 use rocket_infra::{
-    FsCollectionRepo, FsEnvironmentRepo, FsFileTxFactory, FsOpenApiBaselineRepo,
-    FsOpenApiConsentRepo, FsOpenApiLocalRepo, FsOpenApiSourceRepo, FsRequestRenderer,
-    KeyringSecretStore, SharedPathCollectionRepo,
+    FsFileTxFactory, FsOpenApiBaselineRepo, FsOpenApiConsentRepo, FsOpenApiLocalRepo,
+    FsOpenApiSourceRepo, FsRequestRenderer, KeyringSecretStore, SharedPathCollectionRepo,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
-struct FsEnvFactory(PathBuf);
-impl EnvironmentRepositoryFactory for FsEnvFactory {
-    fn make(&self, collection_name: &str) -> Box<dyn EnvironmentRepository> {
-        Box::new(FsEnvironmentRepo::with_secret_store(
-            self.0
-                .join("collections")
-                .join(collection_name)
-                .join("environments"),
-            crate::env_secret_store(),
-        ))
-    }
-}
-
-fn make_import_service(base: PathBuf) -> ImportService {
-    ImportService::new(
-        base.clone(),
-        Box::new(FsCollectionRepo::new_standalone(base.join("collections"))),
-        Box::new(FsEnvFactory(base)),
-    )
-}
+use crate::import_wiring::ImportServiceFactory;
 
 /// Import a Bruno collection or workspace directory. Type is auto-detected from content.
 #[tauri::command]
@@ -42,13 +20,10 @@ pub async fn import_bruno(
     path: String,
     target_workspace_id: String,
     create_new_workspace: Option<bool>,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
 ) -> Result<ImportReport, String> {
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    make_import_service(base)
+    factory
+        .service()?
         .import_auto(
             &PathBuf::from(&path),
             &target_workspace_id,
@@ -62,13 +37,10 @@ pub async fn import_bruno(
 pub async fn import_postman_collection(
     path: String,
     target_workspace_id: String,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
 ) -> Result<ImportReport, String> {
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    make_import_service(base)
+    factory
+        .service()?
         .import_postman_collection(&PathBuf::from(&path), &target_workspace_id)
         .map_err(|e| e.to_string())
 }
@@ -79,13 +51,10 @@ pub async fn import_postman_environment(
     json_path: String,
     collection_name: String,
     target_workspace_id: String,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
 ) -> Result<ImportReport, String> {
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    make_import_service(base)
+    factory
+        .service()?
         .import_postman_environment(
             &PathBuf::from(&json_path),
             &collection_name,
@@ -99,13 +68,10 @@ pub async fn import_postman_environment(
 pub async fn import_wsdl(
     path: String,
     target_workspace_id: String,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
 ) -> Result<ImportReport, String> {
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    make_import_service(base)
+    factory
+        .service()?
         .import_wsdl(&PathBuf::from(&path), &target_workspace_id)
         .map_err(|e| e.to_string())
 }
@@ -116,13 +82,10 @@ pub async fn import_bruno_zip(
     zip_path: String,
     target_workspace_id: String,
     create_new_workspace: Option<bool>,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
 ) -> Result<ImportReport, String> {
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    make_import_service(base)
+    factory
+        .service()?
         .import_auto_from_zip(
             &PathBuf::from(&zip_path),
             &target_workspace_id,
@@ -324,15 +287,12 @@ pub async fn import_openapi_file(
     group_by: String,
     target_workspace_id: String,
     keep_synced: Option<bool>,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
     fetcher: State<'_, Arc<dyn SpecFetcher>>,
 ) -> Result<OpenApiImportDto, String> {
     let group_by = parse_group_by(&group_by)?;
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
-    let service = make_import_service(base.clone());
+    let base = factory.workspace_path()?;
+    let service = factory.service_for(base.clone());
     let file = PathBuf::from(&path);
     if keep_synced != Some(true) {
         return service
@@ -407,16 +367,14 @@ pub async fn import_openapi_url(
     token: Option<String>,
     target_workspace_id: String,
     check_for_updates: Option<bool>,
-    workspace_path: State<'_, Arc<Mutex<PathBuf>>>,
+    factory: State<'_, ImportServiceFactory>,
     fetcher: State<'_, Arc<dyn SpecFetcher>>,
 ) -> Result<OpenApiImportDto, String> {
     let group_by = parse_group_by(&group_by)?;
-    let base = workspace_path
-        .lock()
-        .map_err(|_| "workspace path lock poisoned".to_string())?
-        .clone();
+    let base = factory.workspace_path()?;
     let token = token_arg(token);
-    let mut dto: OpenApiImportDto = make_import_service(base.clone())
+    let mut dto: OpenApiImportDto = factory
+        .service_for(base.clone())
         .import_openapi_url(
             fetcher.inner().as_ref(),
             &FsOpenApiSourceRepo,
