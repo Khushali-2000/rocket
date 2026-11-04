@@ -1,4 +1,5 @@
 mod audit_bridge;
+mod auth_browser;
 mod callback_adapter;
 #[cfg(test)]
 mod ipc_acl_tests;
@@ -1122,7 +1123,6 @@ pub fn run() {
             commands::audit::set_compliance_profile,
             commands::audit::export_audit_evidence,
             commands::audit::save_audit_evidence_file,
-            commands::oauth2::oauth2_auth_code_flow,
             commands::oauth2::oauth2_decode_jwt,
             commands::oauth2::oauth2_get_token,
             commands::oauth2::oauth2_refresh_token,

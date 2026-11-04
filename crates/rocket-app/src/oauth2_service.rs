@@ -8,12 +8,13 @@ use rocket_environment::{
     SecretStore, VariableContext, VaultSecretFetcher,
 };
 use rocket_http::{
-    apply_params_to_body, apply_params_to_url, AdditionalParam, OAuthToken,
+    apply_params_to_body, apply_params_to_url, generate_pkce, AdditionalParam, OAuthToken,
     ResolvedClientCertificate, TokenClientProvider,
 };
 use rocket_shared::error::{DomainError, DomainResult};
 use serde::Deserialize;
 
+use crate::auth_code::{build_auth_url, choose_state, AuthCodeBrowser, AuthCodeRequest};
 use crate::process_env::{ProcessEnv, ProcessEnvScopeInput};
 use crate::redaction::{redact_secrets, MIN_REDACTION_LEN};
 
@@ -682,6 +683,48 @@ impl OAuth2Service {
             .map_err(|e| Self::mask_dot_env(e, process_env))
     }
 
+    /// Runs the authorization code flow: PKCE and state, the authorization URL, the
+    /// browser step behind `browser`, then the code exchange with the redirect URI the
+    /// browser reported (system-browser mode binds its own localhost port).
+    pub async fn authorize_with_code(
+        &self,
+        config: &ResolvedOAuth2Config,
+        browser: &dyn AuthCodeBrowser,
+        process_env: &ProcessEnv,
+    ) -> DomainResult<OAuthToken> {
+        let pkce = config.use_pkce.then(generate_pkce);
+        let state = choose_state(config.state.as_deref());
+        let auth_url = build_auth_url(
+            &config.authorization_url,
+            &config.client_id,
+            &config.callback_url,
+            pkce.as_ref(),
+            &state,
+            config.scope.as_deref(),
+            &config.auth_params,
+        );
+
+        let grant = browser
+            .authorize(AuthCodeRequest {
+                auth_url,
+                callback_url: config.callback_url.clone(),
+                state,
+                verify_ssl: config.verify_ssl,
+                use_system_browser: config.use_system_browser,
+                force_reauth: config.force_reauth,
+            })
+            .await?;
+
+        self.exchange_code_for_token_with_host_env(
+            config,
+            &grant.code,
+            &grant.redirect_uri,
+            pkce.as_ref().map(|p| p.code_verifier.as_str()),
+            process_env,
+        )
+        .await
+    }
+
     /// Resolves all {{variables}} in the get-token request fields.
     pub fn resolve_get_token_request(&self, req: &OAuth2GetTokenRequest) -> ResolvedOAuth2Config {
         self.resolve_get_token_request_with_secrets(req, &HashMap::new())
@@ -945,6 +988,178 @@ pub(crate) mod tests {
             client_certificates: Vec::new(),
             allow_vault_certificates: false,
         }
+    }
+
+    // ─── authorize_with_code ─────────────────────────────
+
+    /// Records the request it gets and answers with a preset grant or error.
+    struct FakeAuthCodeBrowser {
+        seen: std::sync::Mutex<Option<AuthCodeRequest>>,
+        answer: Result<crate::auth_code::AuthCodeGrant, String>,
+    }
+
+    impl FakeAuthCodeBrowser {
+        fn granting(code: &str, redirect_uri: &str) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(None),
+                answer: Ok(crate::auth_code::AuthCodeGrant {
+                    code: code.into(),
+                    redirect_uri: redirect_uri.into(),
+                }),
+            }
+        }
+
+        fn failing(message: &str) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(None),
+                answer: Err(message.into()),
+            }
+        }
+
+        fn request(&self) -> AuthCodeRequest {
+            self.seen
+                .lock()
+                .expect("lock")
+                .clone()
+                .expect("the browser was called")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthCodeBrowser for FakeAuthCodeBrowser {
+        async fn authorize(
+            &self,
+            request: AuthCodeRequest,
+        ) -> DomainResult<crate::auth_code::AuthCodeGrant> {
+            *self.seen.lock().expect("lock") = Some(request);
+            self.answer.clone().map_err(DomainError::Internal)
+        }
+    }
+
+    fn auth_code_config(token_url: &str) -> ResolvedOAuth2Config {
+        ResolvedOAuth2Config {
+            grant_type: "authorization_code".into(),
+            authorization_url: "https://auth.example.com/authorize".into(),
+            token_url: token_url.into(),
+            callback_url: "https://app.example.com/cb".into(),
+            use_pkce: true,
+            token_params: vec![],
+            ..cc_config()
+        }
+    }
+
+    async fn token_server(expected_calls: u64, body_part: Option<&str>) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        let mut mock = wiremock::Mock::given(wiremock::matchers::method("POST"));
+        if let Some(part) = body_part {
+            mock = mock.and(wiremock::matchers::body_string_contains(part));
+        }
+        mock.respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"access_token": "tok", "token_type": "bearer"})),
+        )
+        .expect(expected_calls)
+        .mount(&server)
+        .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn authorize_with_code_exchanges_code_with_pkce_verifier() {
+        let server = token_server(1, Some("code=abc")).await;
+        let svc = make_service();
+        let browser = FakeAuthCodeBrowser::granting("abc", "https://app.example.com/cb");
+        let config = auth_code_config(&format!("{}/token", server.uri()));
+
+        let token = svc
+            .authorize_with_code(&config, &browser, &ProcessEnv::default())
+            .await
+            .expect("token");
+
+        assert_eq!(token.access_token, "tok");
+        let requests = server.received_requests().await.expect("recorded");
+        let body = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(body.contains("code_verifier="), "{body}");
+        assert!(body.contains("grant_type=authorization_code"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn authorize_with_code_uses_browser_redirect_uri_not_config() {
+        let server = token_server(
+            1,
+            Some("redirect_uri=http%3A%2F%2Flocalhost%3A5555%2Fcallback"),
+        )
+        .await;
+        let svc = make_service();
+        let browser = FakeAuthCodeBrowser::granting("abc", "http://localhost:5555/callback");
+        let config = auth_code_config(&format!("{}/token", server.uri()));
+
+        svc.authorize_with_code(&config, &browser, &ProcessEnv::default())
+            .await
+            .expect("token");
+    }
+
+    #[tokio::test]
+    async fn authorize_with_code_passes_state_and_url_to_browser() {
+        let server = token_server(1, None).await;
+        let svc = make_service();
+        let browser = FakeAuthCodeBrowser::granting("abc", "https://app.example.com/cb");
+        let mut config = auth_code_config(&format!("{}/token", server.uri()));
+        config.use_system_browser = true;
+        config.verify_ssl = false;
+        config.force_reauth = true;
+
+        svc.authorize_with_code(&config, &browser, &ProcessEnv::default())
+            .await
+            .expect("token");
+
+        let seen = browser.request();
+        assert!(
+            seen.auth_url.contains(&format!("state={}", seen.state)),
+            "{}",
+            seen.auth_url
+        );
+        assert!(seen.auth_url.contains("code_challenge_method=S256"));
+        assert_eq!(seen.callback_url, "https://app.example.com/cb");
+        assert!(seen.use_system_browser);
+        assert!(!seen.verify_ssl);
+        assert!(seen.force_reauth);
+    }
+
+    #[tokio::test]
+    async fn authorize_with_code_without_pkce_sends_no_verifier() {
+        let server = token_server(1, None).await;
+        let svc = make_service();
+        let browser = FakeAuthCodeBrowser::granting("abc", "https://app.example.com/cb");
+        let mut config = auth_code_config(&format!("{}/token", server.uri()));
+        config.use_pkce = false;
+
+        svc.authorize_with_code(&config, &browser, &ProcessEnv::default())
+            .await
+            .expect("token");
+
+        assert!(!browser.request().auth_url.contains("code_challenge"));
+        let requests = server.received_requests().await.expect("recorded");
+        let body = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(!body.contains("code_verifier"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn authorize_with_code_browser_error_makes_no_token_request() {
+        let server = token_server(0, None).await;
+        let svc = make_service();
+        let browser = FakeAuthCodeBrowser::failing("Authorization denied: nope");
+        let config = auth_code_config(&format!("{}/token", server.uri()));
+
+        let err = svc
+            .authorize_with_code(&config, &browser, &ProcessEnv::default())
+            .await
+            .expect_err("browser failed");
+
+        assert!(
+            err.to_string().contains("Authorization denied: nope"),
+            "{err}"
+        );
     }
 
     #[test]

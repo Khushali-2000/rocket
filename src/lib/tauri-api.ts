@@ -1566,25 +1566,6 @@ export interface OAuth2TokenResponse {
   scope?: string;
 }
 
-export const oauth2AuthCodeFlow = (
-  authorizationUrl: string,
-  tokenUrl: string,
-  clientId: string,
-  clientSecret: string,
-  scope?: string,
-  callbackUrl?: string,
-  verifySsl?: boolean,
-) =>
-  invoke<OAuth2TokenResponse>('oauth2_auth_code_flow', {
-    authorizationUrl,
-    tokenUrl,
-    clientId,
-    clientSecret,
-    scope,
-    callbackUrl,
-    verifySsl,
-  });
-
 // ============================================================
 // OAuth2 — unified commands (Phase 2)
 // ============================================================

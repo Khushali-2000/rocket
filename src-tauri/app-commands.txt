@@ -172,7 +172,6 @@ load_git_credentials_v2
 load_ui_state
 mask_assistant_response
 move_item
-oauth2_auth_code_flow
 oauth2_decode_jwt
 oauth2_get_token
 oauth2_refresh_token

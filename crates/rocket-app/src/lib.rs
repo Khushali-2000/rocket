@@ -8,6 +8,7 @@ pub mod agent_config_service;
 pub mod agent_isolation;
 pub mod assertion_evaluator;
 pub mod assistant_chip_text;
+pub mod auth_code;
 pub mod callback_listener;
 pub(crate) mod client_certificates;
 pub mod collection_export_service;
@@ -102,6 +103,7 @@ pub use assistant_chip_text::{
     ChipKind, ChipResource, ResponseChipHeader, ResponseChipInput, ResponseChipRequest,
     ResponseChipTest, CHIP_TEXT_LIMIT_BYTES,
 };
+pub use auth_code::{AuthCodeBrowser, AuthCodeGrant, AuthCodeRequest};
 pub use callback_listener::{CallbackEndpoint, CallbackListener, NoCallbackListener, ReceivedCall};
 pub use collection_runner_service::{
     CollectionRunnerService, RunCollectionInput, RunStepResult, RunStepStatus, RunSummary,
