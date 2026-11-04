@@ -1,5 +1,6 @@
 use super::types::ContractStatus;
 
+#[derive(Debug)]
 pub enum StatusEvent {
     Publish,
     DriftDetected,
@@ -83,7 +84,7 @@ pub fn transition(
         _ => {
             return Err(InvalidTransition {
                 from: current.clone(),
-                event: format!("{:?}", std::mem::discriminant(event)),
+                event: format!("{event:?}"),
             });
         }
     };
@@ -94,6 +95,17 @@ pub fn transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_transition_reports_event_name() {
+        match transition(&ContractStatus::Draft, &StatusEvent::Renew) {
+            Err(e) => {
+                assert_eq!(e.from, ContractStatus::Draft);
+                assert_eq!(e.event, "Renew");
+            }
+            Ok(status) => panic!("expected an invalid transition, got {status:?}"),
+        }
+    }
 
     #[test]
     fn draft_publish_to_active() {

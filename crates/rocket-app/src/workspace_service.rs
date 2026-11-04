@@ -100,14 +100,15 @@ impl WorkspaceService {
 
     pub fn create(&self, name: &str, path: PathBuf) -> DomainResult<Workspace> {
         Workspace::validate_name(name)?;
-        self.repo.ensure_workspace_dirs(&path)?;
-        // Write workspace.yml inside the workspace directory.
-        let config = WorkspaceConfig::new(name);
-        self.config_repo.save(&path, &config)?;
+        // Check the name first so a duplicate leaves no files on disk.
         let mut registry = self.repo.load()?;
         if registry.name_exists(name, None) {
             return Err(DomainError::AlreadyExists(name.into()));
         }
+        self.repo.ensure_workspace_dirs(&path)?;
+        // Write workspace.yml inside the workspace directory.
+        let config = WorkspaceConfig::new(name);
+        self.config_repo.save(&path, &config)?;
         let workspace = Workspace::new(name, path.clone());
         registry.workspaces.push(workspace.clone());
         self.repo.save(&registry)?;
@@ -660,6 +661,73 @@ mod tests {
         let svc = make_service(&tmp);
         svc.create("My WS", tmp.path().join("ws1")).unwrap();
         assert!(svc.create("My WS", tmp.path().join("ws2")).is_err());
+    }
+
+    #[test]
+    fn create_duplicate_name_leaves_disk_untouched() {
+        let tmp = TempDir::new().expect("tempdir");
+        let svc = make_service(&tmp);
+        svc.create("My WS", tmp.path().join("ws1"))
+            .expect("first create");
+        let before = svc.list().expect("list").len();
+
+        let result = svc.create("My WS", tmp.path().join("ws2"));
+
+        assert!(matches!(result, Err(DomainError::AlreadyExists(_))));
+        assert!(!tmp.path().join("ws2").exists());
+        assert_eq!(svc.list().expect("list").len(), before);
+    }
+
+    #[test]
+    fn create_duplicate_name_keeps_existing_workspace_yml() {
+        let tmp = TempDir::new().expect("tempdir");
+        let svc = make_service(&tmp);
+        svc.create("My WS", tmp.path().join("ws1"))
+            .expect("first create");
+        let yml_path = tmp.path().join("ws1").join("workspace.yml");
+        let before = std::fs::read_to_string(&yml_path).expect("read yml");
+
+        let result = svc.create("My WS", tmp.path().join("ws1"));
+
+        assert!(matches!(result, Err(DomainError::AlreadyExists(_))));
+        assert_eq!(
+            std::fs::read_to_string(&yml_path).expect("read yml"),
+            before
+        );
+    }
+
+    #[test]
+    fn open_workspace_duplicate_name_changes_nothing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let svc = make_service(&tmp);
+        svc.create("Dup", tmp.path().join("a")).expect("create");
+        let other = tmp.path().join("b");
+        MockWorkspaceConfigRepo
+            .save(&other, &WorkspaceConfig::new("Dup"))
+            .expect("write workspace.yml");
+        let before = svc.list().expect("list").len();
+
+        let result = svc.open_workspace(other);
+
+        assert!(matches!(result, Err(DomainError::AlreadyExists(_))));
+        assert_eq!(svc.list().expect("list").len(), before);
+    }
+
+    #[test]
+    fn open_workspace_same_path_twice_is_rejected() {
+        let tmp = TempDir::new().expect("tempdir");
+        let svc = make_service(&tmp);
+        let path = tmp.path().join("c");
+        MockWorkspaceConfigRepo
+            .save(&path, &WorkspaceConfig::new("Opened"))
+            .expect("write workspace.yml");
+        let before = svc.list().expect("list").len();
+
+        svc.open_workspace(path.clone()).expect("first open");
+        let result = svc.open_workspace(path);
+
+        assert!(matches!(result, Err(DomainError::AlreadyExists(_))));
+        assert_eq!(svc.list().expect("list").len(), before + 1);
     }
 
     #[test]

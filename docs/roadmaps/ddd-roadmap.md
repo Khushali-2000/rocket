@@ -43,9 +43,9 @@ Related: [rust-style-roadmap.md](rust-style-roadmap.md) (code style), R-55 in [r
 
 | ID | Item | Where | Status |
 |---|---|---|---|
-| D-10 | `WorkspaceService::create` creates the workspace directories and writes `workspace.yml` before it checks for a duplicate name. A duplicate name returns `AlreadyExists` but leaves orphan files. Reorder: load the registry and check `name_exists` first, then create the directories and config. Add a test that a duplicate create leaves the disk untouched. | `rocket-app/src/workspace_service.rs:101-109` | open |
-| D-11 | Same pattern check for the other `registry.workspaces.push` site (`link external collection`): check before side effects. | `rocket-app/src/workspace_service.rs:282-289` | open |
-| D-12 | `apply_transition` maps `InvalidTransition` to `ContractError::Internal` and drops the event name, so the message is misleading. Keep the event in the error. | `rocket-app/src/contract_service.rs:942` | open |
+| D-10 | `WorkspaceService::create` creates the workspace directories and writes `workspace.yml` before it checks for a duplicate name. A duplicate name returns `AlreadyExists` but leaves orphan files. Reorder: load the registry and check `name_exists` first, then create the directories and config. Add a test that a duplicate create leaves the disk untouched. | `rocket-app/src/workspace_service.rs:101-109` | done (2026-11-04, duplicate name is checked before any disk write) |
+| D-11 | Same pattern check for the other `registry.workspaces.push` site (`link external collection`): check before side effects. | `rocket-app/src/workspace_service.rs:277-289` (`open_workspace`) | done (2026-11-04, audited, no bug; pinned by tests) |
+| D-12 | `apply_transition` maps `InvalidTransition` to `ContractError::Internal` and drops the event name, so the message is misleading. Keep the event in the error. | `rocket-app/src/contract_service.rs:942` | done (2026-11-04, event name kept in the error; `StatusEvent` derives `Debug`) |
 
 ## Phase 2: make the docs true
 

@@ -938,13 +938,15 @@ impl ContractService {
     }
 }
 
-/// Runs the status state machine and maps a rejected event to an internal error.
+/// Runs the status state machine and maps a rejected event to an internal error
+/// that names both the current status and the event.
 fn apply_transition(
     status: &ContractStatus,
     event: &StatusEvent,
 ) -> ContractResult<ContractStatus> {
-    transition_status(status, event)
-        .map_err(|e| ContractError::Internal(format!("invalid transition: {:?}", e.from)))
+    transition_status(status, event).map_err(|e| {
+        ContractError::Internal(format!("invalid transition: {:?} on {}", e.from, e.event))
+    })
 }
 
 /// Increments the patch segment of a semver-like version string.
@@ -1696,7 +1698,7 @@ mod tests {
         ));
         assert_eq!(
             m,
-            format!("invalid transition: {:?}", ContractStatus::Draft)
+            format!("invalid transition: {:?} on Renew", ContractStatus::Draft)
         );
     }
 
@@ -1707,7 +1709,10 @@ mod tests {
         let m = invalid_transition_message(svc.publish_contract(root(), contract.id, vec![]));
         assert_eq!(
             m,
-            format!("invalid transition: {:?}", ContractStatus::Active)
+            format!(
+                "invalid transition: {:?} on Publish",
+                ContractStatus::Active
+            )
         );
     }
 
@@ -1718,7 +1723,7 @@ mod tests {
         let m = invalid_transition_message(svc.accept_drift(root(), contract.id, "v2".into()));
         assert_eq!(
             m,
-            format!("invalid transition: {:?}", ContractStatus::Draft)
+            format!("invalid transition: {:?} on Resign", ContractStatus::Draft)
         );
     }
 
@@ -1729,7 +1734,7 @@ mod tests {
         let m = invalid_transition_message(svc.renew_contract(root(), contract.id, None));
         assert_eq!(
             m,
-            format!("invalid transition: {:?}", ContractStatus::Draft)
+            format!("invalid transition: {:?} on Renew", ContractStatus::Draft)
         );
     }
 
