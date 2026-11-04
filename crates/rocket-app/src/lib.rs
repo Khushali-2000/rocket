@@ -91,6 +91,7 @@ pub(crate) mod vault_certificates;
 pub mod vault_secret_resolution;
 pub mod websocket_service;
 pub mod workspace_service;
+pub mod workspace_watcher;
 
 pub use acp_session_service::{
     AcpSessionService, McpHttpServerCredentials, NoopSessionCleanup, SessionCleanup,
@@ -195,3 +196,4 @@ pub use update_service::{
 pub use vault_secret_resolution::resolve_vault_secret_value;
 pub use websocket_service::WebSocketService;
 pub use workspace_service::WorkspaceService;
+pub use workspace_watcher::WorkspaceWatcher;

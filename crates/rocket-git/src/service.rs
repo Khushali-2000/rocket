@@ -4,6 +4,7 @@ use crate::{
     conflict::{ConflictFile, ConflictResolution},
     credentials::GitCredentials,
     diff::FileDiff,
+    identity::GitIdentity,
     remote::{FetchResult, RemoteInfo},
     stash::StashEntry,
     status::RepoStatus,
@@ -100,6 +101,19 @@ pub trait GitService: Send + Sync {
         resolution: &ConflictResolution,
     ) -> DomainResult<()>;
     fn abort_merge(&self, path: &str) -> DomainResult<()>;
+
+    // Identity
+    /// `user.name` and `user.email` of the repository, as Git would resolve them.
+    /// An unset value is an empty string.
+    fn identity(&self, path: &str) -> DomainResult<GitIdentity>;
+    /// Sets `user.name` and `user.email` in the repository-local config only.
+    fn set_identity(&self, path: &str, name: &str, email: &str) -> DomainResult<()>;
+
+    // SSH keys
+    /// Private key files in the user's `~/.ssh` folder that have a `.pub` partner.
+    fn ssh_key_paths(&self) -> Vec<String>;
+    /// The first default key (`id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa`) found.
+    fn default_ssh_key_path(&self) -> Option<String>;
 }
 
 #[cfg(test)]

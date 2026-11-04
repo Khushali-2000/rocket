@@ -1,4 +1,5 @@
 use rocket_app::{GitAppService, WorkspaceService};
+use rocket_git::GitIdentity;
 use rocket_git::{
     BranchList, CommitInfo, ConflictFile, ConflictResolution, FetchResult, FileDiff,
     GitCredentials, RemoteInfo, RepoStatus, StashEntry,
@@ -9,13 +10,6 @@ use rocket_workspace::{RepositoryId, RepositorySelector};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::State;
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitIdentity {
-    pub name: String,
-    pub email: String,
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -881,16 +875,8 @@ impl From<GitCredentialsPayload> for GitCredentials {
 /// `~/.ssh/`, checking id_ed25519 → id_rsa → id_ecdsa → id_dsa in order.
 /// Returns None if the home directory cannot be determined or no key exists.
 #[tauri::command]
-pub fn get_default_ssh_key_path() -> Option<String> {
-    let home = rocket_shared::paths::home_dir()?;
-    let ssh_dir = home.join(".ssh");
-    for name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
-        let path = ssh_dir.join(name);
-        if path.exists() {
-            return path.to_str().map(str::to_owned);
-        }
-    }
-    None
+pub fn get_default_ssh_key_path(svc: State<'_, GitAppService>) -> Option<String> {
+    svc.default_ssh_key_path()
 }
 
 /// Return all SSH private key paths found in `~/.ssh/` — both standard-named
@@ -899,76 +885,8 @@ pub fn get_default_ssh_key_path() -> Option<String> {
 /// exists alongside it. Standard names are returned first; the rest are sorted
 /// alphabetically.
 #[tauri::command]
-pub fn list_ssh_key_paths() -> Vec<String> {
-    let Some(home) = rocket_shared::paths::home_dir() else {
-        return Vec::new();
-    };
-    let ssh_dir = home.join(".ssh");
-    let Ok(entries) = std::fs::read_dir(&ssh_dir) else {
-        return Vec::new();
-    };
-
-    const STANDARD: &[&str] = &["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
-    // Files in ~/.ssh/ that are definitely not private keys.
-    const SKIP: &[&str] = &[
-        "known_hosts",
-        "known_hosts.old",
-        "authorized_keys",
-        "config",
-        "environment",
-        "rc",
-    ];
-
-    let mut standard: Vec<String> = Vec::new();
-    let mut custom: Vec<String> = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        if name.ends_with(".pub") || name.starts_with('.') {
-            continue;
-        }
-        if SKIP.contains(&name.as_str()) {
-            continue;
-        }
-
-        // Require a paired .pub file — strong signal this is a key pair.
-        if !ssh_dir.join(format!("{}.pub", name)).exists() {
-            continue;
-        }
-
-        let Some(path_str) = path.to_str().map(String::from) else {
-            continue;
-        };
-
-        if STANDARD.contains(&name.as_str()) {
-            standard.push(path_str);
-        } else {
-            custom.push(path_str);
-        }
-    }
-
-    // Standard names in the preferred order; custom names alphabetically after.
-    standard.sort_by_key(|p| {
-        let name = std::path::Path::new(p)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        STANDARD
-            .iter()
-            .position(|&s| s == name)
-            .unwrap_or(usize::MAX)
-    });
-    custom.sort();
-    standard.extend(custom);
-    standard
+pub fn list_ssh_key_paths(svc: State<'_, GitAppService>) -> Vec<String> {
+    svc.ssh_key_paths()
 }
 
 /// Persist git credentials to the OS keychain (macOS Keychain, Windows
@@ -1045,44 +963,14 @@ pub fn load_git_credentials_v2(
     Ok(Some(legacy_creds))
 }
 
-/// Read user.name and user.email from the repo's git config (local → global → system).
-/// Returns empty strings when the values are unset — never errors on a missing entry.
-pub fn git_get_identity(path: String) -> Result<GitIdentity, DomainError> {
-    let repo = git2::Repository::open(&path).map_err(|e| DomainError::Internal(e.to_string()))?;
-    let cfg = repo
-        .config()
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-    let name = cfg.get_string("user.name").unwrap_or_default();
-    let email = cfg.get_string("user.email").unwrap_or_default();
-    Ok(GitIdentity { name, email })
-}
-
-/// Write user.name and user.email to the repo-local .git/config.
-pub fn git_set_identity(path: String, name: String, email: String) -> Result<(), DomainError> {
-    let repo = git2::Repository::open(&path).map_err(|e| DomainError::Internal(e.to_string()))?;
-    let cfg = repo
-        .config()
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-    // open_level gives us the repo-local config only, so we never write to ~/.gitconfig.
-    let mut local = cfg
-        .open_level(git2::ConfigLevel::Local)
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-    local
-        .set_str("user.name", &name)
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-    local
-        .set_str("user.email", &email)
-        .map_err(|e| DomainError::Internal(e.to_string()))?;
-    Ok(())
-}
-
 #[tauri::command]
 pub fn git_get_identity_v2(
     repository_id: String,
     workspace_svc: State<'_, Mutex<WorkspaceService>>,
+    svc: State<'_, GitAppService>,
 ) -> Result<GitIdentity, DomainError> {
     let path = resolve_repository_path(&repository_id, workspace_svc)?;
-    git_get_identity(path)
+    svc.identity(&path)
 }
 
 #[tauri::command]
@@ -1091,40 +979,15 @@ pub fn git_set_identity_v2(
     name: String,
     email: String,
     workspace_svc: State<'_, Mutex<WorkspaceService>>,
+    svc: State<'_, GitAppService>,
 ) -> Result<(), DomainError> {
     let path = resolve_repository_path(&repository_id, workspace_svc)?;
-    git_set_identity(path, name, email)
+    svc.set_identity(&path, &name, &email)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    fn init_repo(dir: &TempDir) -> String {
-        let path = dir.path().to_string_lossy().to_string();
-        git2::Repository::init(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn get_identity_returns_empty_when_unset() {
-        let dir = TempDir::new().unwrap();
-        let path = init_repo(&dir);
-        let identity = git_get_identity(path).unwrap();
-        assert_eq!(identity.name, "");
-        assert_eq!(identity.email, "");
-    }
-
-    #[test]
-    fn set_and_get_identity_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let path = init_repo(&dir);
-        git_set_identity(path.clone(), "Bob".into(), "bob@example.com".into()).unwrap();
-        let identity = git_get_identity(path).unwrap();
-        assert_eq!(identity.name, "Bob");
-        assert_eq!(identity.email, "bob@example.com");
-    }
 
     #[test]
     fn keyring_account_includes_workspace_id() {
@@ -1219,18 +1082,5 @@ mod tests {
                 "message": "Internal error: network failed"
             })
         );
-    }
-
-    #[test]
-    fn set_identity_writes_to_local_config_only() {
-        let dir = TempDir::new().unwrap();
-        let path = init_repo(&dir);
-        git_set_identity(path.clone(), "Local".into(), "local@test.com".into()).unwrap();
-        // Read config at local level only to confirm it's there.
-        let repo = git2::Repository::open(&path).unwrap();
-        let cfg = repo.config().unwrap();
-        let local = cfg.open_level(git2::ConfigLevel::Local).unwrap();
-        assert_eq!(local.get_string("user.name").unwrap(), "Local");
-        assert_eq!(local.get_string("user.email").unwrap(), "local@test.com");
     }
 }

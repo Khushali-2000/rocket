@@ -1,4 +1,11 @@
-use tauri::Manager;
+use std::sync::Arc;
+
+use rocket_shared::error::{DomainError, DomainResult};
+use rocket_workspace::{
+    UiState as DomainUiState, UiStateCollectionTab as DomainCollectionTab, UiStateRepository,
+    UiStateWorkspaceTabs as DomainWorkspaceTabs,
+};
+use tauri::State;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,28 +39,80 @@ pub struct UiStateCollectionTab {
     pub active_section: Option<String>,
 }
 
-#[tauri::command]
-pub fn load_ui_state(app_handle: tauri::AppHandle) -> Result<Option<UiState>, String> {
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let path = config_dir.join("ui-state.yml");
-    if !path.exists() {
-        return Ok(None);
+impl From<DomainUiState> for UiState {
+    fn from(s: DomainUiState) -> Self {
+        Self {
+            active_mode: s.active_mode,
+            workspace_tabs: s.workspace_tabs.map(|t| UiStateWorkspaceTabs {
+                workspace_id: t.workspace_id,
+            }),
+            layout_direction: s.layout_direction,
+            active_collection: s.active_collection,
+            collection_tabs: s
+                .collection_tabs
+                .into_iter()
+                .map(|t| UiStateCollectionTab {
+                    id: t.id,
+                    title: t.title,
+                    collection_name: t.collection_name,
+                    active_section: t.active_section,
+                })
+                .collect(),
+            assistant_panel_width: s.assistant_panel_width,
+        }
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let state: UiState = serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
-    Ok(Some(state))
+}
+
+impl From<UiState> for DomainUiState {
+    fn from(s: UiState) -> Self {
+        Self {
+            active_mode: s.active_mode,
+            workspace_tabs: s.workspace_tabs.map(|t| DomainWorkspaceTabs {
+                workspace_id: t.workspace_id,
+            }),
+            layout_direction: s.layout_direction,
+            active_collection: s.active_collection,
+            collection_tabs: s
+                .collection_tabs
+                .into_iter()
+                .map(|t| DomainCollectionTab {
+                    id: t.id,
+                    title: t.title,
+                    collection_name: t.collection_name,
+                    active_section: t.active_section,
+                })
+                .collect(),
+            assistant_panel_width: s.assistant_panel_width,
+        }
+    }
+}
+
+/// Stands in when the app config folder is unknown, so each call reports why it cannot work.
+pub(crate) struct UnavailableUiState(pub String);
+
+impl UiStateRepository for UnavailableUiState {
+    fn load(&self) -> DomainResult<Option<DomainUiState>> {
+        Err(DomainError::Internal(self.0.clone()))
+    }
+
+    fn save(&self, _state: &DomainUiState) -> DomainResult<()> {
+        Err(DomainError::Internal(self.0.clone()))
+    }
 }
 
 #[tauri::command]
-pub fn save_ui_state(app_handle: tauri::AppHandle, state: UiState) -> Result<(), String> {
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    let content = serde_yaml::to_string(&state).map_err(|e| e.to_string())?;
-    std::fs::write(config_dir.join("ui-state.yml"), content).map_err(|e| e.to_string())
+pub fn load_ui_state(
+    repo: State<'_, Arc<dyn UiStateRepository>>,
+) -> Result<Option<UiState>, String> {
+    repo.load()
+        .map(|state| state.map(UiState::from))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_ui_state(
+    repo: State<'_, Arc<dyn UiStateRepository>>,
+    state: UiState,
+) -> Result<(), String> {
+    repo.save(&state.into()).map_err(|e| e.to_string())
 }

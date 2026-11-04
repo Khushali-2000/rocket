@@ -9,6 +9,7 @@ use crate::commit::CommitInfo;
 use crate::conflict::{ConflictFile, ConflictResolution};
 use crate::credentials::GitCredentials;
 use crate::diff::FileDiff;
+use crate::identity::GitIdentity;
 use crate::remote::{FetchResult, RemoteInfo};
 use crate::service::GitService;
 use crate::stash::StashEntry;
@@ -17,11 +18,13 @@ use crate::status::RepoStatus;
 mod branch;
 mod conflict;
 mod helpers;
+mod identity;
 mod remote;
 mod repo;
 #[cfg(test)]
 mod safety_contracts;
 mod ssh_host_verification;
+mod ssh_keys;
 mod staging;
 mod stash;
 mod status_diff;
@@ -227,6 +230,25 @@ impl GitService for Git2Service {
 
     fn abort_merge(&self, path: &str) -> DomainResult<()> {
         conflict::abort_merge(path)
+    }
+
+    fn identity(&self, path: &str) -> DomainResult<GitIdentity> {
+        identity::identity(path)
+    }
+
+    fn set_identity(&self, path: &str, name: &str, email: &str) -> DomainResult<()> {
+        identity::set_identity(path, name, email)
+    }
+
+    fn ssh_key_paths(&self) -> Vec<String> {
+        match rocket_shared::paths::home_dir() {
+            Some(home) => ssh_keys::key_paths_in(&home.join(".ssh")),
+            None => Vec::new(),
+        }
+    }
+
+    fn default_ssh_key_path(&self) -> Option<String> {
+        ssh_keys::default_key_in(&rocket_shared::paths::home_dir()?.join(".ssh"))
     }
 }
 

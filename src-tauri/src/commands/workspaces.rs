@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use rocket_app::{FlowExecutionService, WorkspaceService};
-use rocket_infra::NotifyFileWatcher;
+use rocket_app::{FlowExecutionService, WorkspaceService, WorkspaceWatcher};
 use rocket_shared::error::DomainError;
-use rocket_shared::events::{DomainEvent, EventPublisher};
 use rocket_workspace::{RepositoryId, RequestGuardPolicy, Workspace, WorkspaceConfig};
 use serde::Serialize;
 use tauri::State;
@@ -74,7 +72,7 @@ pub fn create_workspace(
 pub fn switch_workspace(
     id: String,
     svc: State<'_, Mutex<WorkspaceService>>,
-    watcher: State<'_, NotifyFileWatcher>,
+    watcher: State<'_, WorkspaceWatcher>,
     flow_exec: State<'_, FlowExecutionService>,
     active_path: State<'_, Arc<Mutex<PathBuf>>>,
     fetcher: State<'_, Arc<dyn rocket_http::SpecFetcher>>,
@@ -100,31 +98,8 @@ pub fn switch_workspace(
     flow_exec.clear_run_cache();
     // Restart the file watcher on the new workspace's collections directory so
     // filesystem changes in the new workspace trigger sidebar refreshes.
-    restart_watcher(&watcher, &workspace.path, app);
+    watcher.restart(&workspace.path);
     workspace.try_into()
-}
-
-/// Points the file watcher at `workspace`'s collections directory.
-fn restart_watcher(
-    watcher: &NotifyFileWatcher,
-    workspace: &std::path::Path,
-    app: tauri::AppHandle,
-) {
-    let collections_dir = workspace.join("collections");
-    let publisher = Arc::new(crate::tauri_event_bus::TauriEventBus::new(app));
-    let mut failure = None;
-    if let Err(e) = std::fs::create_dir_all(&collections_dir) {
-        tracing::error!(error = %e, dir = %collections_dir.display(), "could not create the collections directory");
-        failure = Some(format!("{}: {e}", collections_dir.display()));
-    }
-    watcher.stop();
-    if let Err(e) = watcher.start(collections_dir.clone(), publisher.clone()) {
-        tracing::error!(error = %e, dir = %collections_dir.display(), "file watcher failed to start");
-        failure = Some(format!("{}: {e}", collections_dir.display()));
-    }
-    if let Some(message) = failure {
-        publisher.publish(DomainEvent::FileWatcherFailed { message });
-    }
 }
 
 /// Runs a close or delete and moves the file watcher when it changed the active workspace.
@@ -132,9 +107,8 @@ fn remove_workspace(
     remove: impl FnOnce(&WorkspaceService) -> Result<(), DomainError>,
     svc: &Mutex<WorkspaceService>,
     active: &Mutex<PathBuf>,
-    watcher: &NotifyFileWatcher,
+    watcher: &WorkspaceWatcher,
     flow_exec: &FlowExecutionService,
-    app: tauri::AppHandle,
 ) -> Result<(), DomainError> {
     let read_active = || {
         active
@@ -152,7 +126,7 @@ fn remove_workspace(
     flow_exec.clear_run_cache();
     let after = read_active()?;
     if after != before {
-        restart_watcher(watcher, &after, app);
+        watcher.restart(&after);
     }
     Ok(())
 }
@@ -173,11 +147,10 @@ pub fn close_workspace(
     id: String,
     svc: State<'_, Mutex<WorkspaceService>>,
     active: State<'_, Arc<Mutex<PathBuf>>>,
-    watcher: State<'_, NotifyFileWatcher>,
+    watcher: State<'_, WorkspaceWatcher>,
     flow_exec: State<'_, FlowExecutionService>,
-    app: tauri::AppHandle,
 ) -> Result<(), DomainError> {
-    remove_workspace(|s| s.close(&id), &svc, &active, &watcher, &flow_exec, app)
+    remove_workspace(|s| s.close(&id), &svc, &active, &watcher, &flow_exec)
 }
 
 #[tauri::command]
@@ -185,11 +158,10 @@ pub fn delete_workspace(
     id: String,
     svc: State<'_, Mutex<WorkspaceService>>,
     active: State<'_, Arc<Mutex<PathBuf>>>,
-    watcher: State<'_, NotifyFileWatcher>,
+    watcher: State<'_, WorkspaceWatcher>,
     flow_exec: State<'_, FlowExecutionService>,
-    app: tauri::AppHandle,
 ) -> Result<(), DomainError> {
-    remove_workspace(|s| s.delete(&id), &svc, &active, &watcher, &flow_exec, app)
+    remove_workspace(|s| s.delete(&id), &svc, &active, &watcher, &flow_exec)
 }
 
 #[tauri::command]

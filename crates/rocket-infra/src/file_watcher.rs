@@ -72,6 +72,10 @@ impl NotifyFileWatcher {
     ) -> Result<(), String> {
         self.stop();
 
+        // A new workspace has no collections folder yet, and notify cannot watch a
+        // missing path.
+        std::fs::create_dir_all(&collections_dir).map_err(|e| e.to_string())?;
+
         let (sender, receiver) = mpsc::channel();
         let raw_sender = sender.clone();
         let mut watcher = recommended_watcher(move |result: notify::Result<Event>| {
@@ -224,6 +228,20 @@ impl Worker {
     }
 }
 
+impl rocket_workspace::FileWatcher for NotifyFileWatcher {
+    fn start(
+        &self,
+        collections_dir: PathBuf,
+        publisher: Arc<dyn EventPublisher>,
+    ) -> Result<(), String> {
+        NotifyFileWatcher::start(self, collections_dir, publisher)
+    }
+
+    fn stop(&self) {
+        NotifyFileWatcher::stop(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,12 +309,31 @@ mod tests {
     }
 
     #[test]
-    fn start_on_a_missing_directory_returns_an_error() {
+    fn start_creates_a_missing_collections_directory() {
         let dir = TempDir::new().expect("temp dir");
+        let missing = dir.path().join("new-workspace").join("collections");
         let watcher = NotifyFileWatcher::new();
         let publisher = Arc::new(NullEventPublisher);
 
-        let result = watcher.start(dir.path().join("missing"), publisher);
+        watcher
+            .start(missing.clone(), publisher)
+            .expect("a missing folder is created and watched");
+
+        assert!(missing.is_dir());
+        assert_eq!(watcher.workers_alive(), 1);
+        watcher.stop();
+    }
+
+    #[test]
+    fn start_fails_when_the_directory_cannot_be_created() {
+        let dir = TempDir::new().expect("temp dir");
+        // A file sits where the folder should go.
+        let blocked = dir.path().join("collections");
+        std::fs::write(&blocked, "not a folder").expect("write file");
+        let watcher = NotifyFileWatcher::new();
+        let publisher = Arc::new(NullEventPublisher);
+
+        let result = watcher.start(blocked, publisher);
 
         assert!(result.is_err());
         assert_eq!(watcher.workers_alive(), 0);

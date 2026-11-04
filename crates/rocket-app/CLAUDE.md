@@ -21,6 +21,7 @@ D-80 to D-82 plan its split by context.
 | `CollectionService` | CRUD for collections, folders, and requests; enforces name validation; publishes a `DomainEvent` for every mutation. |
 | `CookieService` | Thin wrapper over `CookieRepository` for per-domain cookie jars. |
 | `EnvironmentService` | CRUD for environments; publishes `EnvironmentSaved/Deleted` events. |
+| `WorkspaceWatcher` | Restarts the file watcher on `<workspace>/collections` through the `FileWatcher` port (stop, then start). A failed start is logged and published once as `FileWatcherFailed` with `<folder>: <reason>`. `restart` returns whether the watcher runs. Used at startup and by switch, close and delete of a workspace. |
 | `EnvironmentServices` | Managed state that hands out an `EnvironmentService` per call: `for_collection(name)` (rejects an empty name, a NUL byte, an absolute name or a `..` segment with `InvalidInput("invalid collection name")`) and `global()`. Its repository factories follow the active workspace, so each call points at the workspace active at that moment. Reads and writes share one event publisher and audit publisher (reads publish nothing). |
 | `RequestExecutionService` | Core HTTP dispatch: resolves variables, merges collection settings, runs the request, saves history, publishes `RequestExecuted`. |
 | `ExecuteRequestInput` | Serialisable input DTO for `RequestExecutionService::execute`. |

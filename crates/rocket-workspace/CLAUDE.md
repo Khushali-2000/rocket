@@ -61,6 +61,11 @@ pub trait WorkspaceConfigRepository: Send + Sync {
 ```
 `load` returns a default config derived from the directory name if `workspace.yml` does not exist — callers must not assume the file is always present. Implemented by `FsWorkspaceConfigRepo` in `rocket-infra`.
 
+## UI state and file watcher ports
+
+- `UiStateRepository` (`ui_state.rs`) loads and saves the window layout (`UiState`, no serde derives). `FsUiStateRepo` in `rocket-infra` keeps it in `ui-state.yml` of the app config folder. The persisted keys stay camelCase because files from earlier versions use them.
+- `FileWatcher` (`file_watcher.rs`) starts and stops the watch on a workspace's collections folder. `NotifyFileWatcher` in `rocket-infra` implements it and creates a missing folder on start; `WorkspaceWatcher` in `rocket-app` restarts it and publishes `FileWatcherFailed`.
+
 ## Patterns and Conventions
 
 - All fallible methods return `DomainResult<T>` (`Result<T, DomainError>`) from `rocket-shared`.

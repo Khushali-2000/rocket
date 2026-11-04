@@ -37,6 +37,8 @@ cargo test -p rocket-git -- --nocapture
 | `remote` | `list_remotes`, `add_remote`, `remove_remote`, `set_remote_url`, `push`, `fetch`, `pull` |
 | `stash` | `stash_list`, `stash_save`, `stash_pop`, `stash_apply`, `stash_drop` |
 | `conflict` | `conflicts`, `resolve_conflict`, `abort_merge` |
+| `identity` | `identity` (resolved `user.name` and `user.email`, empty when unset), `set_identity` (repository-local config only, never `~/.gitconfig`) |
+| `ssh_keys` | `ssh_key_paths`, `default_ssh_key_path`: private keys in `~/.ssh` that have a `.pub` partner (standard names first), the first default key |
 | `helpers` | shared internals: `open_repo`, `build_callbacks`, `map_git2_status`, `build_simple_diff`, `ahead_behind`, path/worktree helpers |
 | `ssh_host_verification` | offline SSH host-key classification against a `known_hosts` file: `classify_remote_host`, `classify_known_host`, `parse_ssh_endpoint`, `openssh_sha256_fingerprint` |
 | `tls_certificate_verification` | diagnostic-only HTTPS certificate classification: `classify_tls_certificate`, `https_port`, `sha256_fingerprint` |

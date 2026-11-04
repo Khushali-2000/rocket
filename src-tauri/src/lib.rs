@@ -948,7 +948,15 @@ pub fn run() {
                 Box::new(rocket_infra::FsDirectoryProbe),
             );
 
+            // The saved window layout lives in the app config folder.
+            let ui_state_repo: Arc<dyn rocket_workspace::UiStateRepository> =
+                match app.path().app_config_dir() {
+                    Ok(dir) => Arc::new(rocket_infra::FsUiStateRepo::new(dir)),
+                    Err(e) => Arc::new(commands::ui_state::UnavailableUiState(e.to_string())),
+                };
+
             // Register all services as Tauri managed state.
+            app.manage(ui_state_repo);
             app.manage(collection_discovery);
             app.manage(environment_services);
             app.manage(import_factory);
@@ -994,31 +1002,20 @@ pub fn run() {
 
             commands::updates::start_update_checker(app.handle());
 
-            // Start filesystem watcher for the collections directory.
+            // Start the filesystem watcher for the collections directory. The service is
+            // managed so workspace commands can restart it.
             let watcher_started = std::time::Instant::now();
-            let watcher = NotifyFileWatcher::with_echo_guard(recent_writes);
-            match watcher.start(collections_dir.clone(), watcher_bus.clone()) {
-                Ok(()) => tracing::info!(
+            let workspace_watcher = rocket_app::WorkspaceWatcher::new(
+                Arc::new(NotifyFileWatcher::with_echo_guard(recent_writes)),
+                watcher_bus.clone(),
+            );
+            if workspace_watcher.restart(&workspace_base) {
+                tracing::info!(
                     elapsed_ms = watcher_started.elapsed().as_millis() as u64,
                     "startup: file watcher"
-                ),
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        dir = %collections_dir.display(),
-                        "startup: file watcher failed to start"
-                    );
-                    // The window may not be listening yet, so the log is the fallback.
-                    rocket_shared::events::EventPublisher::publish(
-                        &*watcher_bus,
-                        rocket_shared::events::DomainEvent::FileWatcherFailed {
-                            message: format!("{}: {e}", collections_dir.display()),
-                        },
-                    );
-                }
+                );
             }
-            // Keep the watcher managed so workspace commands can restart it.
-            app.manage(watcher);
+            app.manage(workspace_watcher);
 
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize {

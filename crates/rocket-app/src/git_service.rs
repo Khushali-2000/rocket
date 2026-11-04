@@ -1,7 +1,7 @@
 use rocket_git::service::GitService;
 use rocket_git::{
     BranchList, CommitInfo, ConflictFile, ConflictResolution, FetchResult, FileDiff,
-    GitCredentials, RemoteInfo, RepoStatus, StashEntry,
+    GitCredentials, GitIdentity, RemoteInfo, RepoStatus, StashEntry,
 };
 use rocket_shared::error::DomainResult;
 use rocket_shared::events::{DomainEvent, EventPublisher};
@@ -290,6 +290,25 @@ impl GitAppService {
         });
         Ok(())
     }
+
+    // Identity and SSH keys. Reads and a repository-local config write; none of them
+    // changes the working tree or the index, so they publish no event.
+
+    pub fn identity(&self, path: &str) -> DomainResult<GitIdentity> {
+        self.git.identity(path)
+    }
+
+    pub fn set_identity(&self, path: &str, name: &str, email: &str) -> DomainResult<()> {
+        self.git.set_identity(path, name, email)
+    }
+
+    pub fn ssh_key_paths(&self) -> Vec<String> {
+        self.git.ssh_key_paths()
+    }
+
+    pub fn default_ssh_key_path(&self) -> Option<String> {
+        self.git.default_ssh_key_path()
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +467,18 @@ mod tests {
         }
         fn abort_merge(&self, _: &str) -> DomainResult<()> {
             self.outcome()
+        }
+        fn identity(&self, _: &str) -> DomainResult<GitIdentity> {
+            unimplemented!()
+        }
+        fn set_identity(&self, _: &str, _: &str, _: &str) -> DomainResult<()> {
+            unimplemented!()
+        }
+        fn ssh_key_paths(&self) -> Vec<String> {
+            unimplemented!()
+        }
+        fn default_ssh_key_path(&self) -> Option<String> {
+            unimplemented!()
         }
     }
 

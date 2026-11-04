@@ -83,7 +83,7 @@ fn app_commands_file_is_sorted_and_unique() {
 fn app() -> tauri::App<tauri::test::MockRuntime> {
     tauri::test::mock_builder()
         .invoke_handler(tauri::generate_handler![
-            crate::commands::git::list_ssh_key_paths
+            crate::commands::app::is_compositing_disabled
         ])
         .build(tauri::generate_context!())
         .expect("mock app builds")
@@ -99,7 +99,7 @@ fn local_window(
         .expect("window builds")
 }
 
-/// Calls `list_ssh_key_paths` from the window as if the page at `url` sent it.
+/// Calls `is_compositing_disabled` from the window as if the page at `url` sent it.
 fn invoke(
     webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
     url: &str,
@@ -107,7 +107,7 @@ fn invoke(
     tauri::test::get_ipc_response(
         webview,
         InvokeRequest {
-            cmd: "list_ssh_key_paths".into(),
+            cmd: "is_compositing_disabled".into(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
             url: url.parse().expect("test url parses"),
