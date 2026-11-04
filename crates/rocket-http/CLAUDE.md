@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Crate Does
 
-`rocket-http` is a pure-domain crate: it defines HTTP request/response types, auth utilities, cookie management, and a load-testing harness. It contains **no I/O implementations** — the concrete `ReqwestExecutor` and `FsCookieRepository` live in `rocket-infra`.
+`rocket-http` defines HTTP request/response types, auth utilities, cookie management, and a load-testing harness. The concrete `ReqwestExecutor` and `FsCookieRepository` live in `rocket-infra`.
+
+Known I/O leaks until D-50 ships (see `docs/roadmaps/ddd-roadmap.md`): `acquire_token` in `oauth2.rs` makes a live HTTP POST, and the `TokenClientProvider` trait in `token_client.rs` exposes `reqwest::Client`. `spec_fetch.rs` is a port (`SpecFetcher`) but uses `reqwest::Url` in its helpers. Keep new code free of I/O.
 
 ## Commands
 

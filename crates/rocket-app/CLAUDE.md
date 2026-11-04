@@ -2,9 +2,17 @@
 
 Application-layer orchestration crate. It wires together the domain crates
 (`rocket-collection`, `rocket-environment`, `rocket-git`, `rocket-history`,
-`rocket-http`, `rocket-workspace`) into concrete use-case services, but never
-touches the filesystem or any I/O directly — those concerns live in
+`rocket-http`, `rocket-workspace`) into concrete use-case services. It should
+not touch the filesystem or any I/O directly — those concerns live in
 `rocket-infra`.
+
+Known exceptions in production code until Phase 4 of `docs/roadmaps/ddd-roadmap.md`
+ships: contract attachment file work (D-40), workspace directory checks and
+delete (D-41), the `canonicalize` for the collection lock key (D-42), the proto
+file `metadata` call (D-43), the `reqwest` client and token POST in
+`OAuth2Service` (D-44), and process env, user name and `current_exe` reads
+(D-45). Do not add new ones. The crate is also large (about 33k non-test lines);
+D-80 to D-82 plan its split by context.
 
 ## Public Types
 
@@ -70,7 +78,7 @@ Wraps `Box<dyn GitService>`. Every mutating operation publishes a `DomainEvent`.
 
 ## Key Patterns
 
-- **Trait-object injection.** Every service takes `Box<dyn SomeRepository>` and `Box<dyn EventPublisher>` via its constructor. No concrete types appear in this crate, making all services fully testable with in-memory mocks.
+- **Trait-object injection.** Every service takes `Box<dyn SomeRepository>` and `Box<dyn EventPublisher>` via its constructor. Apart from the I/O exceptions listed at the top, no concrete infra types appear in this crate, so services are testable with in-memory mocks.
 - **DomainResult everywhere.** All fallible methods return `DomainResult<T>` from `rocket-shared`.
 - **Variable resolution in `RequestExecutionService::execute`.** Precedence, lowest first: global environment, collection, RocketVault values, environment, folder chain, request, runtime (Flow vars are runtime). `begin_phases` resolves before any script without the runtime scope; `resolve_runtime_placeholders` (see below) fills what is left after the pre-request scripts.
 - **Backend process env (`{{process.env.*}}`).** `resolve_request_parts` adds process env as the lowest layer only when `ExecuteRequestInput.backend_process_env` is set. Both it and `literal` are `#[serde(skip)]`, so an IPC input never sets them, because the frontend owns that pass for its own sends. `runner_sequence::build_step_input` sets the flag for every backend send: the runner, Flow request nodes, nested `rok.runRequest` targets and the assistant's `run_request`. The gate is decided once (`ProcessEnv.allowed`). Fields in `literal` (wired Flow values, fetched or wired Auth-node tokens) are sent as written and resolve no scope at all, even after a script edits them (`FieldTemplate::literal`, `RequestTemplates.literal_headers`, #129), and client certificate fields resolve without process env, so response data never pulls a host or vault value in. Every `.env` value joins `secret_values`, the used host values go to `run_process_env_values` (masked in `run_request` output), and a withheld placeholder sets `process_env_withheld` and adds one Console line in the top-level caller's `finish_phases`. A send's own used host values, plus those of earlier Flow nodes, are masked in its History URL, `RequestExecuted` URL, executor error and script console. A failed send hands its mask set and used host values back through `SendCapture` (`execute_capturing_masked`), so its `exchange`, `debug_request` and later nodes are masked too, and a repeat-until condition uses the attempt's masks. Known limit: a nested `rok.runRequest` child in a Flow Request gets no upstream Flow host values. Flow planning (`run_with_options_unpinned`, entered through `run_with_options`) reads the variable scopes lazily, only when some text has `{{`. See `docs/features/collection-trust.md`.

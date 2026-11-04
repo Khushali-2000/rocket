@@ -53,11 +53,11 @@ Cheap, and it stops agents and people from trusting claims the code breaks. Do t
 
 | ID | Item | Where | Status |
 |---|---|---|---|
-| D-20 | `rocket-http` says "no I/O implementations". It has a live HTTP POST (`acquire_token`) and a `reqwest::Client` in trait signatures. Correct the text now, restore it when D-31 ships. | `crates/rocket-http/CLAUDE.md:7` | open |
-| D-21 | `rocket-git` says "pure domain crate, no I/O". `Git2Service` does filesystem, process and network work. Say "port plus libgit2 adapter". | `crates/rocket-git/CLAUDE.md:23` | open |
-| D-22 | `rocket-import` says it delegates all disk writes to `rocket-infra`. It writes with `std::fs` itself and `rocket-infra` is a dev-dependency only. | `crates/rocket-import/CLAUDE.md:7` | open |
-| D-23 | `rocket-app` says it never touches the filesystem or I/O. Document the exceptions until D-40 to D-44 ship, and that the crate is large. | `crates/rocket-app/CLAUDE.md` | open |
-| D-24 | `rocket-collection` doc says "no filesystem access" but `openapi_consent.rs:49` calls `canonicalize`. Fix after D-34. | `crates/rocket-collection/CLAUDE.md` | open |
+| D-20 | `rocket-http` says "no I/O implementations". It has a live HTTP POST (`acquire_token`) and a `reqwest::Client` in trait signatures. Correct the text now, restore it when D-31 ships. | `crates/rocket-http/CLAUDE.md:7` | done (2026-11-04, text restored when its fix item ships) |
+| D-21 | `rocket-git` says "pure domain crate, no I/O". `Git2Service` does filesystem, process and network work. Say "port plus libgit2 adapter". | `crates/rocket-git/CLAUDE.md:23` | done (2026-11-04, text restored when its fix item ships) |
+| D-22 | `rocket-import` says it delegates all disk writes to `rocket-infra`. It writes with `std::fs` itself and `rocket-infra` is a dev-dependency only. | `crates/rocket-import/CLAUDE.md:7` | done (2026-11-04, text restored when its fix item ships) |
+| D-23 | `rocket-app` says it never touches the filesystem or I/O. Document the exceptions until D-40 to D-44 ship, and that the crate is large. | `crates/rocket-app/CLAUDE.md` | done (2026-11-04, text restored when its fix item ships) |
+| D-24 | `rocket-collection` doc says "no filesystem access" but `openapi_consent.rs:49` calls `canonicalize`. Fix after D-34. | `crates/rocket-collection/CLAUDE.md` | done (2026-11-04, text restored when its fix item ships) |
 
 ## Phase 3: command layer back to thin
 

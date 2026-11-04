@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`rocket-collection` is a pure domain crate — no I/O, no filesystem access. It defines the Collection aggregate and its repository trait. The filesystem implementation lives in `rocket-infra`.
+`rocket-collection` is a domain crate with no I/O, except one filesystem call: `openapi_consent.rs` runs `std::fs::canonicalize` on the collection root (removed by D-52 in `docs/roadmaps/ddd-roadmap.md`). It defines the Collection aggregate and its repository trait. The filesystem implementation lives in `rocket-infra`.
 
 ## Commands
 

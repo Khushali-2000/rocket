@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-`rocket-import` orchestrates importing Bruno API client collections, Postman collections and WSDL 1.1 files into RocketAPI. It parses both `.bru` (DSL) and `.yml` (YAML) Bruno formats, converts the parsed AST into domain types, and delegates all disk writes to `FsCollectionRepo` and `FsEnvironmentRepo` from `rocket-infra`. No raw YAML is written by this crate.
+`rocket-import` orchestrates importing Bruno API client collections, Postman collections and WSDL 1.1 files into RocketAPI. It parses both `.bru` (DSL) and `.yml` (YAML) Bruno formats, and converts the parsed AST into domain types. Collection and environment saves go through the repository traits (the `rocket-infra` implementations are injected by the caller; `rocket-infra` is a dev-dependency only).
+
+The crate also touches the disk itself with `std::fs`: the importer copies collection files, merges root defaults and copies support files (`importer.rs`), `bru/zip_extractor.rs` extracts to a temp dir, and the importer writes some YAML directly. Ruling D-01 moves this behind a small file port (D-51 in `docs/roadmaps/ddd-roadmap.md`).
 
 ## Commands
 

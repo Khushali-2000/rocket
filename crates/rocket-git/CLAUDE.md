@@ -20,7 +20,7 @@ cargo test -p rocket-git -- --nocapture
 
 ## Architecture
 
-`rocket-git` is a pure domain crate — no I/O wiring, no Tauri, no async. It defines the git abstraction layer used by the broader Rocket API client.
+`rocket-git` is the `GitService` port plus its libgit2 adapter (`Git2Service`), no Tauri, no async. The adapter does filesystem, process and network work, so the crate is mixed on purpose (ruling D-01 in `docs/engineering/ddd-decisions.md`). `GitService` stays the only way in; keep adapter code under `git2_service/`.
 
 ### Trait + Implementation pattern
 
