@@ -114,7 +114,7 @@ pub use collection_service::CollectionService;
 pub use collection_trust::{
     effective_capabilities, Capability, CollectionTrustService, TrustStatus,
 };
-pub use contract_service::ContractService;
+pub use contract_service::{ContractEdit, ContractService, NewContract};
 pub use conversation_service::{
     ConversationInput, ConversationService, MAX_INPUT_TEXT_BYTES, MAX_SESSION_PINS,
 };

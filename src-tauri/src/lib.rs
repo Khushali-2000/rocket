@@ -943,7 +943,13 @@ pub fn run() {
             let import_factory =
                 import_wiring::ImportServiceFactory::new(Arc::clone(&active_workspace_path));
 
+            // Folder scans for the open-folder and clone flows.
+            let collection_discovery = rocket_collection::discovery::CollectionDiscovery::new(
+                Box::new(rocket_infra::FsDirectoryProbe),
+            );
+
             // Register all services as Tauri managed state.
+            app.manage(collection_discovery);
             app.manage(environment_services);
             app.manage(import_factory);
             app.manage(export_svc);

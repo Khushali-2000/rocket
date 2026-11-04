@@ -10,8 +10,7 @@ use crate::commands::contract_dtos::{
     summary::{ContractDriftSummaryDto, ContractSummaryDto},
     types::{ContractDto, ContractPartyDto, ContractPolicyDto, ContractScopeDto},
 };
-use rocket_app::ContractService;
-use rocket_collection::contract::types::{Contract, ContractEnforcementMode, ContractStatus};
+use rocket_app::{ContractEdit, ContractService, NewContract};
 use std::path::PathBuf;
 use tauri::State;
 use ulid::Ulid;
@@ -58,46 +57,25 @@ pub fn attach_contract(
         .transpose()
         .map_err(|e| format!("invalid expiryDate: {e}"))?;
 
-    let status = if input.publish_immediately {
-        ContractStatus::Active
-    } else {
-        ContractStatus::Draft
-    };
+    let snapshots: Vec<rocket_collection::contract::snapshot::RequestSignatureSnapshot> = input
+        .initial_snapshots
+        .into_iter()
+        .map(Into::into)
+        .collect();
 
-    let contract = Contract {
-        id: Ulid::new(),
+    let new_contract = NewContract {
         title: input.title,
         provider: input.provider.into(),
         consumers: input.consumers.into_iter().map(Into::into).collect(),
-        project: String::new(), // project field superseded by ContractParty identities; retained for backward compat
         version: input.version,
-        status,
         effective_date,
         expiry_date,
-        document_paths: vec![],
-        enforcement_mode: ContractEnforcementMode::Informational,
         scope: input.scope.into(),
         policy: input.policy.into(),
-        drift_count: 0,
-        breach_count: 0,
-        endpoint_count: 0, // overwritten by the service after the snapshot walk
-        created_by: None,
-        created_at: None, // set by the service
-        updated_at: None, // set by the service
+        publish_immediately: input.publish_immediately,
     };
 
-    let snapshots: Vec<rocket_collection::contract::snapshot::RequestSignatureSnapshot> =
-        if input.publish_immediately {
-            input
-                .initial_snapshots
-                .into_iter()
-                .map(Into::into)
-                .collect()
-        } else {
-            vec![]
-        };
-
-    svc.attach_contract(&root, contract, snapshots, input.document_paths)
+    svc.attach_new(&root, new_contract, snapshots, input.document_paths)
         .map(|c| (&c).into())
         .map_err(|e| e.to_string())
 }
@@ -141,35 +119,20 @@ pub fn update_contract(
         .transpose()
         .map_err(|e| format!("invalid expiryDate: {}", e))?;
 
-    // Load existing contract to preserve scope and enforcement_mode.
-    let existing = svc.get_contract(&root, id).map_err(|e| e.to_string())?;
-
-    let updated = Contract {
-        id,
+    let edit = ContractEdit {
         title: input.title,
         provider: input.provider.into(),
         consumers: input.consumers.into_iter().map(Into::into).collect(),
-        project: existing.project, // preserve existing value; field superseded by ContractParty
         version: input.version,
-        status: existing.status,
         effective_date,
         expiry_date,
-        // Merged inside the service from kept_document_paths + new_document_paths.
-        document_paths: vec![],
-        enforcement_mode: existing.enforcement_mode,
-        scope: existing.scope,
         policy: input.policy.into(),
-        drift_count: existing.drift_count,
-        breach_count: existing.breach_count,
-        endpoint_count: existing.endpoint_count,
-        created_by: existing.created_by,
-        created_at: existing.created_at,
-        updated_at: existing.updated_at, // refreshed by the service
     };
 
-    svc.update_contract(
+    svc.edit_contract(
         &root,
-        updated,
+        id,
+        edit,
         input.new_document_paths,
         input.kept_document_paths,
     )

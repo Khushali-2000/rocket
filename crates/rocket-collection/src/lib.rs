@@ -1,5 +1,6 @@
 pub mod collection;
 pub mod contract;
+pub mod discovery;
 pub mod file_tx;
 pub mod folder;
 pub mod folder_settings;

@@ -1,6 +1,6 @@
 use super::folder_settings_dto::FolderSettingsDto;
 use rocket_app::{CollectionService, ContractService, WorkspaceService};
-use rocket_collection::contract::snapshot::RequestSignatureSnapshot;
+use rocket_collection::discovery::{CollectionDiscovery, FoundCollection};
 use rocket_collection::{
     Collection, CollectionSummary, CollectionVariable, FolderSettings, GraphQlRequest, GrpcRequest,
     Request, WebSocketRequest,
@@ -9,7 +9,6 @@ use rocket_shared::action::HttpRequestExample;
 use rocket_shared::error::DomainError;
 use rocket_workspace::RepositoryId;
 use serde::Serialize;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -246,38 +245,16 @@ pub fn save_request(
 ) -> Result<Request, DomainError> {
     let saved = svc.save_request(&collection, &path, &request)?;
 
-    // Contract audit hook — silently diffs the new signature against the
-    // stored snapshot and appends any changes to the contract changelog.
-    // Failures here must never propagate: the save itself has succeeded.
-    let collection_root = {
-        let guard = active_workspace_path.lock().unwrap();
-        guard.join("collections").join(&collection)
-    };
-    // Build the snapshot path from the actual file name written to disk.
-    // Using `path` (the raw frontend input) risks a mismatch if the infra
-    // layer migrated a .json extension to .yml — the baseline snapshot was
-    // built from the on-disk file name, so the snapshot key must match.
-    let snap_path = saved
-        .file_name
-        .as_deref()
-        .map(|fname| {
-            // Reconstruct the collection-relative path: preserve any folder
-            // prefix from the original `path`, replacing only the filename.
-            let parent = std::path::Path::new(&path).parent();
-            match parent {
-                Some(p) if !p.as_os_str().is_empty() => p.join(fname).to_string_lossy().to_string(),
-                _ => fname.to_string(),
-            }
-        })
-        .unwrap_or_else(|| path.clone());
-    let snapshot = RequestSignatureSnapshot::from_request(&snap_path, &saved);
-    if let Err(e) = contract_svc.on_request_saved(&collection_root, snapshot) {
-        tracing::warn!(
-            error = %e,
+    // Contract audit hook. The save has already succeeded, so nothing here may fail it.
+    let collection_root = active_workspace_path
+        .lock()
+        .map(|workspace| workspace.join("collections").join(&collection));
+    match collection_root {
+        Ok(root) => contract_svc.audit_saved_request(&root, &path, &saved),
+        Err(_) => tracing::warn!(
             collection = %collection,
-            request_path = %snap_path,
-            "contract audit hook failed — changelog may be incomplete"
-        );
+            "workspace path lock poisoned — contract audit skipped"
+        ),
     }
 
     Ok(saved)
@@ -413,33 +390,25 @@ pub struct CollectionScanResult {
     pub path: String,
 }
 
+impl From<FoundCollection> for CollectionScanResult {
+    fn from(found: FoundCollection) -> Self {
+        Self {
+            name: found.name,
+            path: found.path.to_string_lossy().to_string(),
+        }
+    }
+}
+
 #[tauri::command]
-pub fn scan_collections_in_path(path: String) -> Result<Vec<CollectionScanResult>, DomainError> {
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut results = Vec::new();
-    let entries = fs::read_dir(dir).map_err(|e| DomainError::Internal(e.to_string()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| DomainError::Internal(e.to_string()))?;
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        if entry_path.join("opencollection.yml").exists() {
-            results.push(CollectionScanResult {
-                name,
-                path: entry_path.to_string_lossy().to_string(),
-            });
-        }
-    }
-    results.sort_by_key(|r| r.name.to_lowercase());
-    Ok(results)
+pub fn scan_collections_in_path(
+    path: String,
+    discovery: State<'_, CollectionDiscovery>,
+) -> Result<Vec<CollectionScanResult>, DomainError> {
+    Ok(discovery
+        .scan(Path::new(&path))?
+        .into_iter()
+        .map(CollectionScanResult::from)
+        .collect())
 }
 
 /// Result of analyzing a cloned repository's structure.
@@ -463,95 +432,22 @@ pub struct ClonedRepoStructure {
 /// 4. Direct children have `opencollection.yml` -> multi-collection
 /// 5. Otherwise -> unknown
 #[tauri::command]
-pub fn detect_cloned_structure(path: String) -> Result<ClonedRepoStructure, DomainError> {
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
-        return Ok(ClonedRepoStructure {
-            kind: "unknown".into(),
-            workspace_path: None,
-            collections: vec![],
-        });
-    }
-
-    // Case 1: Workspace root with workspace.yml.
-    if dir.join("workspace.yml").exists() {
-        let collections = scan_opencollection_dirs(dir)?;
-        return Ok(ClonedRepoStructure {
-            kind: "workspace".into(),
-            workspace_path: Some(path),
-            collections,
-        });
-    }
-
-    // Case 2: Single collection at root.
-    if dir.join("opencollection.yml").exists() {
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "collection".into());
-        return Ok(ClonedRepoStructure {
-            kind: "collection".into(),
-            workspace_path: None,
-            collections: vec![CollectionScanResult {
-                name,
-                path: path.clone(),
-            }],
-        });
-    }
-
-    // Case 3: collections/ subdirectory.
-    let collections_subdir = dir.join("collections");
-    if collections_subdir.is_dir() {
-        let collections = scan_opencollection_dirs(&collections_subdir)?;
-        if !collections.is_empty() {
-            return Ok(ClonedRepoStructure {
-                kind: "multi_collection".into(),
-                workspace_path: None,
-                collections,
-            });
-        }
-    }
-
-    // Case 4: Direct children are collections.
-    let collections = scan_opencollection_dirs(dir)?;
-    if !collections.is_empty() {
-        return Ok(ClonedRepoStructure {
-            kind: "multi_collection".into(),
-            workspace_path: None,
-            collections,
-        });
-    }
-
+pub fn detect_cloned_structure(
+    path: String,
+    discovery: State<'_, CollectionDiscovery>,
+) -> Result<ClonedRepoStructure, DomainError> {
+    let found = discovery.detect(Path::new(&path))?;
     Ok(ClonedRepoStructure {
-        kind: "unknown".into(),
-        workspace_path: None,
-        collections: vec![],
+        kind: found.kind.as_str().into(),
+        workspace_path: found
+            .workspace_path
+            .map(|p| p.to_string_lossy().to_string()),
+        collections: found
+            .collections
+            .into_iter()
+            .map(CollectionScanResult::from)
+            .collect(),
     })
-}
-
-/// Scan direct subdirectories for ones containing `opencollection.yml`.
-fn scan_opencollection_dirs(dir: &Path) -> Result<Vec<CollectionScanResult>, DomainError> {
-    let mut results = Vec::new();
-    let entries = fs::read_dir(dir).map_err(|e| DomainError::Internal(e.to_string()))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| DomainError::Internal(e.to_string()))?;
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        if entry_path.join("opencollection.yml").exists() {
-            results.push(CollectionScanResult {
-                name,
-                path: entry_path.to_string_lossy().to_string(),
-            });
-        }
-    }
-    results.sort_by_key(|r| r.name.to_lowercase());
-    Ok(results)
 }
 
 #[tauri::command]

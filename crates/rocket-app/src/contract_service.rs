@@ -9,10 +9,13 @@ use rocket_collection::{
         diff::diff_signature,
         repository::{ContractError, ContractRepository, ContractResult},
         snapshot::{ContractSnapshot, RequestSignatureSnapshot},
-        types::{Contract, ContractEnforcementMode, ContractScope, ContractStatus},
+        types::{
+            Contract, ContractEnforcementMode, ContractParty, ContractPolicy, ContractScope,
+            ContractStatus,
+        },
         {transition_status, StatusEvent},
     },
-    CollectionItem, CollectionRepository, Folder,
+    CollectionItem, CollectionRepository, Folder, Request,
 };
 use std::{
     path::{Path, PathBuf},
@@ -95,6 +98,100 @@ fn copy_attachments(
     }
 
     Ok(relative_paths)
+}
+
+/// The key a saved request's snapshot is stored under: the requested path with its last
+/// segment replaced by the file name on disk. The infra layer may have migrated a `.json`
+/// request to `.yml`, and the baseline snapshot was built from the on-disk name, so the key
+/// must follow it. Without a file name the requested path is used as it is.
+pub fn snapshot_path(requested_path: &str, saved_file_name: Option<&str>) -> String {
+    match saved_file_name {
+        Some(file_name) => match Path::new(requested_path).parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                parent.join(file_name).to_string_lossy().to_string()
+            }
+            _ => file_name.to_string(),
+        },
+        None => requested_path.to_string(),
+    }
+}
+
+/// What a person enters to create a contract. The service fills in the rest.
+#[derive(Debug, Clone)]
+pub struct NewContract {
+    pub title: String,
+    pub provider: ContractParty,
+    pub consumers: Vec<ContractParty>,
+    pub version: String,
+    pub effective_date: chrono::NaiveDate,
+    pub expiry_date: Option<chrono::NaiveDate>,
+    pub scope: ContractScope,
+    pub policy: ContractPolicy,
+    /// `true` makes the contract `Active` with a baseline snapshot, `false` leaves a `Draft`.
+    pub publish_immediately: bool,
+}
+
+impl NewContract {
+    /// The contract before it is stored. `attach_contract` sets the final id, the
+    /// timestamps, the document paths and `endpoint_count`.
+    pub fn into_contract(self) -> Contract {
+        let status = if self.publish_immediately {
+            ContractStatus::Active
+        } else {
+            ContractStatus::Draft
+        };
+        Contract {
+            id: Ulid::new(),
+            title: self.title,
+            provider: self.provider,
+            consumers: self.consumers,
+            // Superseded by the party identities; kept for older files.
+            project: String::new(),
+            version: self.version,
+            status,
+            effective_date: self.effective_date,
+            expiry_date: self.expiry_date,
+            document_paths: vec![],
+            enforcement_mode: ContractEnforcementMode::Informational,
+            scope: self.scope,
+            policy: self.policy,
+            drift_count: 0,
+            breach_count: 0,
+            endpoint_count: 0,
+            created_by: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+}
+
+/// The fields a person can change on a stored contract. Scope, status, counters and
+/// creation data are not part of an edit.
+#[derive(Debug, Clone)]
+pub struct ContractEdit {
+    pub title: String,
+    pub provider: ContractParty,
+    pub consumers: Vec<ContractParty>,
+    pub version: String,
+    pub effective_date: chrono::NaiveDate,
+    pub expiry_date: Option<chrono::NaiveDate>,
+    pub policy: ContractPolicy,
+}
+
+impl ContractEdit {
+    /// `existing` with the edited fields replaced.
+    pub fn apply_to(self, existing: Contract) -> Contract {
+        Contract {
+            title: self.title,
+            provider: self.provider,
+            consumers: self.consumers,
+            version: self.version,
+            effective_date: self.effective_date,
+            expiry_date: self.expiry_date,
+            policy: self.policy,
+            ..existing
+        }
+    }
 }
 
 pub struct ContractService {
@@ -238,6 +335,70 @@ impl ContractService {
         );
 
         Ok(contract)
+    }
+
+    /// The audit hook for a saved request: diffs its new signature against each covering
+    /// contract's tracking snapshot and appends what changed to the changelog.
+    ///
+    /// The save itself has already succeeded, so a failure here is logged and never
+    /// returned.
+    pub fn audit_saved_request(
+        &self,
+        collection_root: &Path,
+        requested_path: &str,
+        saved: &Request,
+    ) {
+        let key = snapshot_path(requested_path, saved.file_name.as_deref());
+        let snapshot = RequestSignatureSnapshot::from_request(&key, saved);
+        if let Err(e) = self.on_request_saved(collection_root, snapshot) {
+            tracing::warn!(
+                error = %e,
+                collection_root = %collection_root.display(),
+                request_path = %key,
+                "contract audit hook failed — changelog may be incomplete"
+            );
+        }
+    }
+
+    /// Creates a contract from `input`. Initial snapshots only count for a published
+    /// contract; a draft starts without a baseline from the caller.
+    pub fn attach_new(
+        &self,
+        collection_root: &Path,
+        input: NewContract,
+        initial_snapshots: Vec<RequestSignatureSnapshot>,
+        document_paths: Vec<PathBuf>,
+    ) -> ContractResult<Contract> {
+        let snapshots = if input.publish_immediately {
+            initial_snapshots
+        } else {
+            vec![]
+        };
+        self.attach_contract(
+            collection_root,
+            input.into_contract(),
+            snapshots,
+            document_paths,
+        )
+    }
+
+    /// Applies `edit` to the stored contract `id`. Scope, status, counters and creation
+    /// data stay as they are.
+    pub fn edit_contract(
+        &self,
+        collection_root: &Path,
+        id: Ulid,
+        edit: ContractEdit,
+        new_document_paths: Vec<PathBuf>,
+        kept_document_paths: Vec<PathBuf>,
+    ) -> ContractResult<Contract> {
+        let existing = self.repo.load_contract(collection_root, id)?;
+        self.update_contract(
+            collection_root,
+            edit.apply_to(existing),
+            new_document_paths,
+            kept_document_paths,
+        )
     }
 
     /// Update metadata fields of an existing contract (title, parties, project,
@@ -1622,6 +1783,216 @@ mod tests {
         let mut c = make_contract();
         c.status = status;
         c
+    }
+
+    // ─── snapshot_path and audit_saved_request ─────────────────────────
+
+    #[test]
+    fn snapshot_path_replaces_file_name_keeping_folders() {
+        assert_eq!(
+            snapshot_path("Users/get.json", Some("get.yml")),
+            "Users/get.yml"
+        );
+        assert_eq!(
+            snapshot_path("a/b/get.json", Some("get.yml")),
+            "a/b/get.yml"
+        );
+    }
+
+    #[test]
+    fn snapshot_path_without_folder() {
+        assert_eq!(snapshot_path("get.json", Some("get.yml")), "get.yml");
+    }
+
+    #[test]
+    fn snapshot_path_falls_back_to_requested_path() {
+        assert_eq!(snapshot_path("Users/get.json", None), "Users/get.json");
+    }
+
+    #[test]
+    fn audit_saved_request_records_a_changelog_entry_for_a_covered_request() {
+        let svc = make_service();
+        let contract = svc
+            .attach_contract(
+                root(),
+                make_contract(),
+                vec![make_snap("requests/test.yml")],
+                vec![],
+            )
+            .expect("attach");
+        // Saved under the old `.json` name; the file on disk is `test.yml`.
+        let mut saved = Request::new("Test", HttpMethod::Post, "/test");
+        saved.file_name = Some("test.yml".into());
+
+        svc.audit_saved_request(root(), "requests/test.json", &saved);
+
+        let log = svc.get_changelog(root(), contract.id).expect("changelog");
+        assert!(
+            log.entries.iter().any(|e| e.field == "method"),
+            "{:?}",
+            log.entries
+        );
+    }
+
+    #[test]
+    fn audit_saved_request_without_contracts_does_nothing() {
+        let svc = make_service();
+        let mut saved = Request::new("Test", HttpMethod::Get, "/test");
+        saved.file_name = Some("test.yml".into());
+
+        svc.audit_saved_request(root(), "requests/test.yml", &saved);
+
+        assert!(svc.list_contracts(root()).expect("list").is_empty());
+    }
+
+    // ─── NewContract, ContractEdit, attach_new, edit_contract ─────────────
+
+    fn new_contract(publish_immediately: bool) -> NewContract {
+        NewContract {
+            title: "Orders API".into(),
+            provider: ContractParty::from_name("Team A"),
+            consumers: vec![ContractParty::from_name("Team B")],
+            version: "v1.0".into(),
+            effective_date: Utc::now().date_naive(),
+            expiry_date: None,
+            scope: ContractScope::Collection,
+            policy: ContractPolicy::default(),
+            publish_immediately,
+        }
+    }
+
+    fn contract_edit(title: &str) -> ContractEdit {
+        ContractEdit {
+            title: title.into(),
+            provider: ContractParty::from_name("Team C"),
+            consumers: vec![],
+            version: "v2.0".into(),
+            effective_date: Utc::now().date_naive(),
+            expiry_date: None,
+            policy: ContractPolicy {
+                notice_days: 30,
+                ..ContractPolicy::default()
+            },
+        }
+    }
+
+    #[test]
+    fn into_contract_publish_immediately_is_active() {
+        assert_eq!(
+            new_contract(true).into_contract().status,
+            ContractStatus::Active
+        );
+    }
+
+    #[test]
+    fn into_contract_otherwise_is_draft() {
+        assert_eq!(
+            new_contract(false).into_contract().status,
+            ContractStatus::Draft
+        );
+    }
+
+    #[test]
+    fn into_contract_starts_with_zero_counters_and_informational_mode() {
+        let c = new_contract(true).into_contract();
+        assert_eq!(c.enforcement_mode, ContractEnforcementMode::Informational);
+        assert_eq!((c.drift_count, c.breach_count, c.endpoint_count), (0, 0, 0));
+        assert!(c.project.is_empty());
+        assert!(c.document_paths.is_empty());
+        assert!(c.created_by.is_none() && c.created_at.is_none() && c.updated_at.is_none());
+    }
+
+    #[test]
+    fn apply_to_keeps_scope_status_counters_and_creation_fields() {
+        let mut existing = make_contract_with_status(ContractStatus::Paused);
+        existing.scope = ContractScope::Folder {
+            rel_path: PathBuf::from("auth"),
+        };
+        existing.drift_count = 3;
+        existing.breach_count = 1;
+        existing.endpoint_count = 7;
+        existing.project = "Project X".into();
+        existing.created_by = Some("me".into());
+        let id = existing.id;
+
+        let edited = contract_edit("Renamed").apply_to(existing);
+
+        assert_eq!(edited.id, id);
+        assert_eq!(edited.status, ContractStatus::Paused);
+        assert_eq!(
+            edited.scope,
+            ContractScope::Folder {
+                rel_path: PathBuf::from("auth")
+            }
+        );
+        assert_eq!(
+            (
+                edited.drift_count,
+                edited.breach_count,
+                edited.endpoint_count
+            ),
+            (3, 1, 7)
+        );
+        assert_eq!(edited.project, "Project X");
+        assert_eq!(edited.created_by.as_deref(), Some("me"));
+        assert_eq!(edited.title, "Renamed");
+        assert_eq!(edited.version, "v2.0");
+        assert_eq!(edited.policy.notice_days, 30);
+        assert!(edited.consumers.is_empty());
+    }
+
+    #[test]
+    fn attach_new_drops_snapshots_for_a_draft() {
+        let svc = make_service();
+        let snaps = vec![make_snap("a.yml"), make_snap("b.yml")];
+
+        let c = svc
+            .attach_new(root(), new_contract(false), snaps, vec![])
+            .expect("attach");
+
+        assert_eq!(c.status, ContractStatus::Draft);
+        assert_eq!(c.endpoint_count, 0);
+    }
+
+    #[test]
+    fn attach_new_keeps_snapshots_when_published() {
+        let svc = make_service();
+        let snaps = vec![make_snap("a.yml"), make_snap("b.yml")];
+
+        let c = svc
+            .attach_new(root(), new_contract(true), snaps, vec![])
+            .expect("attach");
+
+        assert_eq!(c.status, ContractStatus::Active);
+        assert_eq!(c.endpoint_count, 2);
+    }
+
+    #[test]
+    fn edit_contract_changes_only_the_edit_fields_in_the_store() {
+        let svc = make_service();
+        let created = svc
+            .attach_new(root(), new_contract(true), vec![make_snap("a.yml")], vec![])
+            .expect("attach");
+
+        let edited = svc
+            .edit_contract(root(), created.id, contract_edit("Renamed"), vec![], vec![])
+            .expect("edit");
+
+        let stored = svc.get_contract(root(), created.id).expect("stored");
+        assert_eq!(stored.title, "Renamed");
+        assert_eq!(stored.status, ContractStatus::Active);
+        assert_eq!(stored.endpoint_count, 1);
+        assert_eq!(stored.created_at, created.created_at);
+        assert_eq!(edited.title, stored.title);
+    }
+
+    #[test]
+    fn edit_contract_unknown_id_is_not_found() {
+        let svc = make_service();
+
+        let result = svc.edit_contract(root(), Ulid::new(), contract_edit("x"), vec![], vec![]);
+
+        assert!(matches!(result, Err(ContractError::NotFound(_))));
     }
 
     #[test]

@@ -86,6 +86,10 @@ All structs use `#[serde(rename_all = "camelCase")]` for JSON serialization. Opt
 - `chain_scripts` orders one phase's scripts for a `ScriptFlow`, request script included, blanks skipped.
 - `CollectionRepository::{get_folder_settings, save_folder_settings, get_folder_chain_settings}` have defaults so test doubles keep compiling.
 
+## Discovery (`discovery.rs`)
+
+`CollectionDiscovery` finds collections and workspaces inside a folder for the open-folder and git-clone flows. `DirectoryProbe` (`is_dir`, `has_file`, `child_dirs`) is the port; `FsDirectoryProbe` in `rocket-infra` implements it. `scan(dir)` lists the direct subfolders that hold `opencollection.yml` (no dot folders, sorted by lowercase name, a missing folder gives an empty list). `detect(dir)` decides in this order: `workspace.yml` (workspace, with its collections), `opencollection.yml` at the root (one collection), a `collections/` folder with collections, then direct children; otherwise unknown. An unreadable folder is an error.
+
 ## CollectionRepository
 
 The trait is **synchronous** (no `async`). Despite `async-trait` being in `Cargo.toml`, all methods return `DomainResult<T>` directly. The concrete implementation is `FsCollectionRepo` in `rocket-infra`.
